@@ -9,12 +9,13 @@ from PyQt6.QtWidgets import (
     QLabel,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QKeySequence
 
 from widgets.chart_area import ChartArea
 from widgets.watchlist import WatchlistWidget
 from widgets.orderbook import OrderBookTable
 from widgets.bottom_panel import BottomPanel
+from widgets.trading_dialog import TradingDialog, OrderData
 from data.mock_data import (
     get_watchlist_symbols,
     get_mock_prices,
@@ -31,6 +32,9 @@ class TradingTerminalWindow(QMainWindow):
         self.setWindowTitle("Trading Terminal - Modular PyQt6 Demo")
         self.resize(1200, 700)
 
+        self.current_symbol = "BTCUSDT"  # Track current symbol
+        self.symbol_prices = get_mock_prices()
+
         self._create_menu_bar()
         self._create_tool_bar()
         self._create_central_chart()
@@ -38,8 +42,6 @@ class TradingTerminalWindow(QMainWindow):
         self._create_right_orderbook_dock()
         self._create_bottom_panel_dock()
         self._create_status_bar()
-
-        self.symbol_prices = get_mock_prices()
 
     # ----- Menu -----
     def _create_menu_bar(self):
@@ -53,6 +55,13 @@ class TradingTerminalWindow(QMainWindow):
 
         view_menu = menu_bar.addMenu("View")
         view_menu.addAction("Reset Layout", self.reset_layout)
+
+        # --- Trade Menu ---
+        trade_menu = menu_bar.addMenu("Trade")
+        new_order_action = QAction("New Order...", self)
+        new_order_action.setShortcut(QKeySequence("F2"))
+        new_order_action.triggered.connect(self.open_trading_dialog)
+        trade_menu.addAction(new_order_action)
 
         # --- Settings ---
         settings_menu = menu_bar.addMenu("Settings")
@@ -114,12 +123,16 @@ class TradingTerminalWindow(QMainWindow):
         self.bottom_panel = BottomPanel()
         self.bottom_panel.load_positions(get_mock_positions())
         self.bottom_panel.load_trades(get_mock_trades())
+        
+        # Kết nối signal để xử lý close position
+        self.bottom_panel.position_close_requested.connect(self.on_close_position_requested)
 
         dock.setWidget(self.bottom_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
 
     # ----- Handlers -----
     def on_symbol_selected(self, symbol: str):
+        self.current_symbol = symbol
         self.statusBar().showMessage(f"Selected symbol: {symbol}", 3000)
         self.chart_area.set_symbol(symbol)
         self._update_price_label(symbol)
@@ -189,6 +202,59 @@ class TradingTerminalWindow(QMainWindow):
         else:
             self.db_status_label.setText("DB: Error")
             self.db_status_label.setStyleSheet("color: red;")
+
+    def open_trading_dialog(self):
+        """
+        Mở dialog đặt lệnh trading (Non-Modal).
+        Sử dụng symbol hiện tại và giá hiện tại.
+        Dialog không block main window - có thể thao tác song song.
+        """
+        current_price = self.symbol_prices.get(self.current_symbol, 0.0)
+        dialog = TradingDialog(self.current_symbol, current_price, self)
+        dialog.order_submitted.connect(self.on_order_submitted)
+        dialog.show()  # Non-modal - không block main window
+
+    def on_order_submitted(self, order_data: OrderData):
+        """
+        Handler khi order được submit từ dialog.
+        TODO: Implement logic thật - gọi API, lưu DB, cập nhật UI.
+        """
+        QMessageBox.information(
+            self,
+            "Order Submitted",
+            f"Order placed successfully!\n\n"
+            f"Symbol: {order_data.symbol}\n"
+            f"Side: {order_data.side}\n"
+            f"Type: {order_data.order_type.value}\n"
+            f"Quantity: {order_data.quantity}\n"
+            f"Leverage: {order_data.leverage}x\n\n"
+            f"TODO: Implement real order execution."
+        )
+        self.statusBar().showMessage(f"Order submitted: {order_data.side} {order_data.quantity} {order_data.symbol}", 5000)
+
+    def on_close_position_requested(self, symbol: str, side: str):
+        """
+        Handler khi user click nút Close position.
+        Sau này implement logic thật: gọi API close position, cập nhật DB, v.v.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Close Position",
+            f"Bạn có chắc muốn đóng position {side} {symbol}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # TODO: Implement logic close position thật
+            # - Gọi API exchange
+            # - Cập nhật database
+            # - Refresh bảng positions
+            self.statusBar().showMessage(f"Closing position: {side} {symbol}...", 3000)
+            QMessageBox.information(
+                self,
+                "Close Position",
+                f"Position {side} {symbol} đã được đóng (placeholder).\nSau này sẽ implement logic thật."
+            )
 
     
     

@@ -14,7 +14,7 @@ class ChartArea(QWidget):
         )
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet(
-            "QLabel { border: 1px solid #555; font-size: 16px; padding: 20px; }"
+            "QLabel { border: none; font-size: 16px; padding: 20px; }"
         )
         layout.addWidget(self.label)
 
