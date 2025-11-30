@@ -17,6 +17,7 @@ from widgets.orderbook import OrderBookTable
 from widgets.bottom_panel import BottomPanel
 from data.mock_data import (
     get_watchlist_symbols,
+    get_mock_prices,
     get_mock_orderbook,
     get_mock_positions,
     get_mock_trades,
@@ -37,6 +38,8 @@ class TradingTerminalWindow(QMainWindow):
         self._create_right_orderbook_dock()
         self._create_bottom_panel_dock()
         self._create_status_bar()
+
+        self.symbol_prices = get_mock_prices()
 
     # ----- Menu -----
     def _create_menu_bar(self):
@@ -119,7 +122,15 @@ class TradingTerminalWindow(QMainWindow):
     def on_symbol_selected(self, symbol: str):
         self.statusBar().showMessage(f"Selected symbol: {symbol}", 3000)
         self.chart_area.set_symbol(symbol)
+        self._update_price_label(symbol)
         # Sau này: refesh orderbook / positions cho symbol này
+
+    def _update_price_label(self, symbol: str):
+        price = self.symbol_prices.get(symbol)
+        if price is None:
+            self.price_label.setText(f"Price: N/A for {symbol}")
+        else:
+            self.price_label.setText(f"Price: {symbol} = {price:,.2f}")
 
     def on_start_clicked(self):
         QMessageBox.information(self, "Start", "Start streaming / bot (placeholder).")
@@ -140,12 +151,15 @@ class TradingTerminalWindow(QMainWindow):
     def _create_status_bar(self):
         status_bar = self.statusBar()
 
+        self.price_label = QLabel("Price: --")
         self.api_status_label = QLabel("API: Not configured")
         self.db_status_label = QLabel("DB: Not configured")
 
+        self.price_label.setStyleSheet("color: #007acc;")
         self.api_status_label.setStyleSheet("color: gray;")
         self.db_status_label.setStyleSheet("color: gray;")
 
+        status_bar.addPermanentWidget(self.price_label)
         status_bar.addPermanentWidget(self.api_status_label)
         status_bar.addPermanentWidget(self.db_status_label)
 

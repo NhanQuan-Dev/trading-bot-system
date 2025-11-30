@@ -3,6 +3,16 @@
 def get_watchlist_symbols():
     return ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 
+
+def get_mock_prices():
+    return {
+        "BTCUSDT": 62000.5,
+        "ETHUSDT": 3100.25,
+        "BNBUSDT": 415.75,
+        "SOLUSDT": 145.3,
+    }
+
+
 def get_mock_orderbook():
     return [
         ("BID", 62000.5, 1.2),
