@@ -1,12 +1,13 @@
 # widgets/bottom_panel.py
 
-from PyQt6.QtWidgets import QWidget, QTabWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QPushButton
+from PyQt6.QtWidgets import QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton, QLabel
 from PyQt6.QtCore import Qt, pyqtSignal
 
 
 class BottomPanel(QWidget):
     # Signal để emit khi user click nút Close
     position_close_requested = pyqtSignal(str, str)  # (symbol, side)
+    close_all_positions_requested = pyqtSignal()  # Signal để close tất cả positions
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,9 +82,82 @@ class BottomPanel(QWidget):
         data: list of tuples (symbol, side, entry, mark, qty, pnl, sl, tp)
         """
         table = self.positions_table
-        table.setRowCount(len(data))
+        # +1 row for summary at the top
+        table.setRowCount(len(data) + 1)
 
-        for row, row_data in enumerate(data):
+        # Add summary row first (row 0)
+        summary_row = 0
+        
+        # Merge first 8 columns for Total PnL
+        table.setSpan(summary_row, 0, 1, 8)
+        
+        # Calculate total PnL
+        total_pnl = sum(float(row[5]) for row in data) if data else 0
+        total_value = sum(float(row[2]) * float(row[4]) for row in data) if data else 1
+        pnl_percent = (total_pnl / total_value * 100) if total_value > 0 else 0
+        
+        # Create Total PnL item
+        pnl_item = QTableWidgetItem()
+        pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        # Color and format
+        if total_pnl > 0:
+            pnl_item.setForeground(Qt.GlobalColor.darkGreen)
+            sign = "+"
+        elif total_pnl < 0:
+            pnl_item.setForeground(Qt.GlobalColor.red)
+            sign = ""
+        else:
+            pnl_item.setForeground(Qt.GlobalColor.gray)
+            sign = ""
+        
+        pnl_item.setText(f"  Total PnL: {sign}${abs(total_pnl):,.0f} ({sign}{abs(pnl_percent):.2f}%)")
+        
+        # Bold font
+        from PyQt6.QtGui import QFont
+        font = QFont()
+        font.setBold(True)
+        pnl_item.setFont(font)
+        
+        table.setItem(summary_row, 0, pnl_item)
+        
+        # Close All button in action column (col 8)
+        close_all_btn = QPushButton("Close All")
+        close_all_btn.setFixedSize(60, 20)
+        close_all_btn.setEnabled(len(data) > 0)
+        close_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                border: none;
+                padding: 2px 4px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #fb8c00;
+            }
+            QPushButton:disabled {
+                background-color: #555;
+                color: #888;
+            }
+        """)
+        close_all_btn.clicked.connect(self._on_close_all_clicked)
+        
+        # Container for button centering
+        from PyQt6.QtWidgets import QWidget as QW, QHBoxLayout
+        container = QW()
+        container_layout = QHBoxLayout(container)
+        container_layout.addWidget(close_all_btn)
+        container_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        
+        table.setCellWidget(summary_row, 8, container)
+
+        # Load position data starting from row 1
+        for idx, row_data in enumerate(data):
+            row = idx + 1  # Skip row 0 (summary)
             # Các cột dữ liệu thông thường
             for col, value in enumerate(row_data):
                 item = QTableWidgetItem(str(value))
@@ -137,6 +211,13 @@ class BottomPanel(QWidget):
         from PyQt6.QtWidgets import QHeaderView
         table.setColumnWidth(8, 75)
         table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
+
+    def _on_close_all_clicked(self):
+        """
+        Handler khi click nút Close All.
+        Emit signal để MainWindow xử lý.
+        """
+        self.close_all_positions_requested.emit()
 
     def _on_close_position_clicked(self, symbol: str, side: str):
         """

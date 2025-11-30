@@ -126,6 +126,7 @@ class TradingTerminalWindow(QMainWindow):
         
         # Kết nối signal để xử lý close position
         self.bottom_panel.position_close_requested.connect(self.on_close_position_requested)
+        self.bottom_panel.close_all_positions_requested.connect(self.on_close_all_positions_requested)
 
         dock.setWidget(self.bottom_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
@@ -210,7 +211,15 @@ class TradingTerminalWindow(QMainWindow):
         Dialog không block main window - có thể thao tác song song.
         """
         current_price = self.symbol_prices.get(self.current_symbol, 0.0)
-        dialog = TradingDialog(self.current_symbol, current_price, self)
+        symbols = get_watchlist_symbols()
+        
+        dialog = TradingDialog(
+            self.current_symbol, 
+            current_price, 
+            self,
+            symbols=symbols,
+            symbol_prices=self.symbol_prices
+        )
         dialog.order_submitted.connect(self.on_order_submitted)
         dialog.show()  # Non-modal - không block main window
 
@@ -254,6 +263,31 @@ class TradingTerminalWindow(QMainWindow):
                 self,
                 "Close Position",
                 f"Position {side} {symbol} đã được đóng (placeholder).\nSau này sẽ implement logic thật."
+            )
+
+    def on_close_all_positions_requested(self):
+        """
+        Handler khi user click nút Close All positions.
+        Hiển thị dialog xác nhận và đóng tất cả positions.
+        """
+        reply = QMessageBox.warning(
+            self,
+            "Close All Positions",
+            "Bạn có chắc muốn đóng TẤT CẢ positions?\n\nHành động này không thể hoàn tác!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # TODO: Implement logic close tất cả positions thật
+            # - Gọi API close tất cả positions
+            # - Cập nhật database
+            # - Refresh bảng positions
+            self.statusBar().showMessage("Closing all positions...", 3000)
+            QMessageBox.information(
+                self,
+                "Close All Positions",
+                "Tất cả positions đã được đóng (placeholder).\nSau này sẽ implement logic thật."
             )
 
     

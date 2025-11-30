@@ -76,14 +76,16 @@ class TradingDialog(QDialog):
 
     order_submitted = pyqtSignal(OrderData)
 
-    def __init__(self, symbol: str = "BTCUSDT", current_price: float = 0.0, parent=None):
+    def __init__(self, symbol: str = "BTCUSDT", current_price: float = 0.0, parent=None, symbols: list[str] = None, symbol_prices: dict = None):
         super().__init__(parent)
 
         self.symbol = symbol
         self.current_price = current_price if current_price > 0 else 62000.5
+        self.available_symbols = symbols or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+        self.symbol_prices = symbol_prices or {}
 
         self.setWindowTitle(f"Trading - {symbol}")
-        self.resize(550, 700)
+        self.resize(550, 750)
 
         self._init_ui()
         self._connect_signals()
@@ -93,6 +95,9 @@ class TradingDialog(QDialog):
     def _init_ui(self):
         """Khởi tạo UI"""
         layout = QVBoxLayout(self)
+
+        # Symbol Selection
+        layout.addWidget(self._create_symbol_selection_group())
 
         # Position Settings Group
         layout.addWidget(self._create_position_settings_group())
@@ -111,6 +116,30 @@ class TradingDialog(QDialog):
 
         # Action Buttons
         layout.addLayout(self._create_action_buttons())
+
+    def _create_symbol_selection_group(self) -> QGroupBox:
+        """Tạo group Symbol Selection"""
+        group = QGroupBox("Symbol")
+        layout = QHBoxLayout()
+
+        # Symbol combo
+        self.symbol_combo = QComboBox()
+        self.symbol_combo.addItems(self.available_symbols)
+        self.symbol_combo.setCurrentText(self.symbol)
+        self.symbol_combo.setMinimumWidth(150)
+
+        # Current price label
+        self.current_price_label = QLabel(f"${self.current_price:,.2f}")
+        self.current_price_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #007acc;")
+
+        layout.addWidget(QLabel("Select Symbol:"))
+        layout.addWidget(self.symbol_combo)
+        layout.addStretch()
+        layout.addWidget(QLabel("Current Price:"))
+        layout.addWidget(self.current_price_label)
+
+        group.setLayout(layout)
+        return group
 
     def _create_position_settings_group(self) -> QGroupBox:
         """Tạo group Position Settings"""
@@ -345,6 +374,9 @@ class TradingDialog(QDialog):
 
     def _connect_signals(self):
         """Kết nối signals"""
+        # Symbol changed
+        self.symbol_combo.currentTextChanged.connect(self._on_symbol_changed)
+
         # Order type changed
         self.order_type_group.buttonClicked.connect(self._on_order_type_changed)
 
@@ -364,6 +396,26 @@ class TradingDialog(QDialog):
         # Action buttons
         self.buy_button.clicked.connect(lambda: self._on_submit_order("LONG"))
         self.sell_button.clicked.connect(lambda: self._on_submit_order("SHORT"))
+
+    def _on_symbol_changed(self, symbol: str):
+        """Handler khi symbol thay đổi"""
+        self.symbol = symbol
+        self.setWindowTitle(f"Trading - {symbol}")
+        
+        # Cập nhật giá hiện tại nếu có
+        if self.symbol_prices and symbol in self.symbol_prices:
+            self.current_price = self.symbol_prices[symbol]
+            self.current_price_label.setText(f"${self.current_price:,.2f}")
+            
+            # Cập nhật các giá trị mặc định
+            self.price_spin.setValue(self.current_price)
+            self.stop_price_spin.setValue(self.current_price * 0.98)
+            self.limit_price_spin.setValue(self.current_price * 0.97)
+            self.sl_spin.setValue(self.current_price * 0.97)
+            self.tp_spin.setValue(self.current_price * 1.05)
+            
+            # Tính lại summary
+            self._calculate_summary()
 
     def _on_order_type_changed(self):
         """Handler khi order type thay đổi"""
