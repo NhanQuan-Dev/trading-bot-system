@@ -1,0 +1,63 @@
+INFO:     Started server process [817045]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58058 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58058 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58058 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58058 - "OPTIONS /api/v1/exchanges/connections/fb46ffae-261c-4e6b-8a02-f164515f49de HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58060 - "DELETE /api/v1/exchanges/connections/fb46ffae-261c-4e6b-8a02-f164515f49de HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:55416 - "OPTIONS /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55418 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:37192 - "OPTIONS /api/v1/exchanges/connections/test HTTP/1.1" 200 OK
+[TEST-CONN] connection_id=6368cbbb-e8c8-43b6-97e6-e7278a40c337 use_testnet=True api_key=EqB9UA...3iav
+[BINANCE-CLIENT] base_url=https://testnet.binancefuture.com api_key=EqB9UA...3iav
+[BINANCE-CLIENT] signed request endpoint=/fapi/v2/account keys=timestamp timestamp=1766158272403
+INFO:     127.0.0.1:37194 - "POST /api/v1/exchanges/connections/test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37194 - "OPTIONS /api/v1/exchanges/connections/6368cbbb-e8c8-43b6-97e6-e7278a40c337 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37192 - "DELETE /api/v1/exchanges/connections/6368cbbb-e8c8-43b6-97e6-e7278a40c337 HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:44176 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49298 - "OPTIONS /api/v1/exchanges/connections/080e3045-4936-4650-9c67-297e74491613 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49314 - "DELETE /api/v1/exchanges/connections/080e3045-4936-4650-9c67-297e74491613 HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:38462 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:46184 - "OPTIONS /api/v1/auth/register HTTP/1.1" 200 OK
+(trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "/home/qwe/Desktop/zxc/backend/venv/lib/python3.12/site-packages/passlib/handlers/bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+INFO:     127.0.0.1:46190 - "POST /api/v1/auth/register HTTP/1.1" 201 Created
+INFO:     127.0.0.1:46190 - "OPTIONS /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46184 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36358 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36374 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36374 - "OPTIONS /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36376 - "OPTIONS /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36358 - "OPTIONS /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36396 - "OPTIONS /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36382 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36382 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36404 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36404 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36376 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36396 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52820 - "OPTIONS /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52828 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:34216 - "OPTIONS /api/v1/exchanges/connections/b208df38-ed84-4553-bf3c-4cb430b374af HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34230 - "DELETE /api/v1/exchanges/connections/b208df38-ed84-4553-bf3c-4cb430b374af HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:38722 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:37278 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37294 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36394 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36394 - "GET /api/v1/users/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36394 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36394 - "OPTIONS /api/v1/exchanges/connections/1587e266-99fb-4dae-9adf-abea422420bd HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36400 - "DELETE /api/v1/exchanges/connections/1587e266-99fb-4dae-9adf-abea422420bd HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:50314 - "POST /api/v1/exchanges/connections HTTP/1.1" 201 Created
+INFO:     127.0.0.1:59772 - "OPTIONS /api/v1/bots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59778 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59790 - "GET /api/v1/bots HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:59778 - "OPTIONS /api/v1/bots/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59790 - "GET /api/v1/bots/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41828 - "GET /api/v1/exchanges/connections HTTP/1.1" 200 OK

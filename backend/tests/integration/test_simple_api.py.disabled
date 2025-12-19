@@ -1,0 +1,89 @@
+"""
+Simplified API integration tests to verify basic FastAPI functionality
+without complex controller dependencies.
+"""
+import pytest
+import asyncio
+from httpx import AsyncClient
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+# Import only the basic app components without complex controllers
+@pytest.fixture
+def simple_app():
+    """Create a simplified FastAPI app for testing basic functionality."""
+    from fastapi import FastAPI
+    
+    app = FastAPI(title="Trading Bot API - Simple Test")
+    
+    @app.get("/health")
+    async def health_check():
+        return {"status": "ok", "message": "Simple app is working"}
+    
+    @app.get("/test-import")
+    async def test_import():
+        """Test that basic trading modules can be imported."""
+        try:
+            # Test domain imports
+            from src.trading.domain.exchange import ExchangeType
+            from src.trading.domain.order import OrderType, OrderStatus
+            
+            # Test infrastructure imports
+            from src.trading.infrastructure.persistence.models.order_models import OrderModel
+            
+            return {
+                "status": "success",
+                "message": "All basic imports working",
+                "exchange_types": [e.value for e in ExchangeType],
+                "order_types": [t.value for t in OrderType]
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Import failed: {str(e)}"}
+    
+    return app
+
+@pytest.fixture
+async def client(simple_app):
+    """Create test client."""
+    async with AsyncClient(app=simple_app, base_url="http://test") as ac:
+        yield ac
+
+class TestBasicAPIFunctionality:
+    """Test basic API functionality without complex dependencies."""
+    
+    @pytest.mark.asyncio
+    async def test_health_endpoint(self, client):
+        """Test basic health endpoint works."""
+        response = await client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+    
+    @pytest.mark.asyncio
+    async def test_basic_imports(self, client):
+        """Test that basic trading modules can be imported."""
+        response = await client.get("/test-import")
+        assert response.status_code == 200
+        data = response.json()
+        print(f"Import test result: {data}")
+        
+        if data["status"] == "error":
+            pytest.fail(f"Import test failed: {data['message']}")
+        
+        assert data["status"] == "success"
+        assert "exchange_types" in data
+        assert "order_types" in data
+
+class TestComplexAppCreation:
+    """Test creating the full complex app."""
+    
+    def test_full_app_creation(self):
+        """Test that the full trading app can be created."""
+        try:
+            from src.trading.app import create_app
+            app = create_app()
+            assert app is not None
+            assert isinstance(app, FastAPI)
+            print("✅ Full FastAPI app created successfully")
+        except Exception as e:
+            pytest.fail(f"Failed to create full app: {str(e)}")

@@ -1,0 +1,286 @@
+"""API integration tests for backtesting REST endpoints.
+
+Tests backtesting API endpoints using FastAPI TestClient with in-memory database.
+"""
+
+import pytest
+from decimal import Decimal
+from datetime import datetime
+from uuid import uuid4
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from src.trading.app import create_app
+from src.trading.infrastructure.persistence.database import Base, get_db
+
+
+# Test database URL
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@pytest.fixture
+async def test_engine():
+    """Create test database engine."""
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    
+    # Create all tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    yield engine
+    
+    # Cleanup
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    
+    await engine.dispose()
+
+
+@pytest.fixture
+async def test_db_session(test_engine):
+    """Create test database session."""
+    SessionLocal = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+    
+    async with SessionLocal() as session:
+        yield session
+
+
+@pytest.fixture
+async def app(test_db_session):
+    """Create FastAPI test application with test database."""
+    app = create_app()
+    
+    # Override database dependency
+    async def override_get_db():
+        yield test_db_session
+    
+    app.dependency_overrides[get_db] = override_get_db
+    
+    return app
+
+
+@pytest.fixture
+async def client(app):
+    """Create async HTTP client for API testing."""
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+def sample_backtest_request():
+    """Sample backtest request payload."""
+    return {
+        "name": "API Integration Test",
+        "strategy_id": str(uuid4()),
+        "config": {
+            "symbol": "BTCUSDT",
+            "timeframe": "1h",
+            "start_date": "2024-01-01T00:00:00",
+            "end_date": "2024-12-31T23:59:59",
+            "initial_capital": "10000.00",
+            "position_sizing": "fixed_percent",
+            "position_size_percent": "10.00",
+            "max_position_size": "5000.00",
+            "slippage_model": "percentage",
+            "slippage_percent": "0.001",
+            "commission_model": "percentage",
+            "commission_rate": "0.001",
+            "mode": "event_driven"
+        }
+    }
+
+
+class TestBacktestAPIIntegration:
+    """Test backtesting API endpoints with FastAPI TestClient."""
+    
+    @pytest.mark.asyncio
+    async def test_health_check_endpoint(self, client):
+        """Test basic health check endpoint works."""
+        
+        response = await client.get("/health")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+    
+    @pytest.mark.asyncio
+    async def test_api_docs_accessible(self, client):
+        """Test that API documentation is accessible."""
+        
+        response = await client.get("/api/docs")
+        
+        assert response.status_code == 200
+        assert "html" in response.headers.get("content-type", "")
+    
+    @pytest.mark.asyncio
+    async def test_create_backtest_endpoint_structure(self, client, sample_backtest_request):
+        """Test POST /api/v1/backtests endpoint structure (may fail on logic but should route correctly)."""
+        
+        response = await client.post("/api/v1/backtests", json=sample_backtest_request)
+        
+        # Should route correctly (not 404) even if it fails on business logic
+        assert response.status_code != 404, "Endpoint routing failed - import fixes didn't work"
+        
+        # Could be 422 (validation), 500 (server error), or 202 (success)
+        assert response.status_code in [202, 422, 500], f"Unexpected status: {response.status_code}"
+    
+    @pytest.mark.asyncio
+    async def test_list_backtests_endpoint_routing(self, client):
+        """Test GET /api/v1/backtests endpoint routing works."""
+        
+        response = await client.get("/api/v1/backtests")
+        
+        # Should route correctly
+        assert response.status_code != 404, "Backtests list endpoint not routed properly"
+        
+        # Should return some form of response (even if empty or error)
+        assert response.status_code in [200, 422, 500]
+    
+    @pytest.mark.asyncio
+    async def test_get_backtest_by_id_routing(self, client):
+        """Test GET /api/v1/backtests/{id} endpoint routing."""
+        
+        test_id = str(uuid4())
+        response = await client.get(f"/api/v1/backtests/{test_id}")
+        
+        # Should route correctly (not 404 for missing route)
+        assert response.status_code != 404, "Backtest by ID endpoint not routed properly"
+        
+        # Could be 404 (not found), 422 (validation), or 500 (error)
+        assert response.status_code in [404, 422, 500]
+    
+    @pytest.mark.asyncio
+    async def test_backtest_status_endpoint_routing(self, client):
+        """Test GET /api/v1/backtests/{id}/status endpoint routing."""
+        
+        test_id = str(uuid4())
+        response = await client.get(f"/api/v1/backtests/{test_id}/status")
+        
+        # Should route correctly
+        assert response.status_code != 404, "Backtest status endpoint not routed properly"
+    
+    @pytest.mark.asyncio
+    async def test_backtest_results_endpoint_routing(self, client):
+        """Test GET /api/v1/backtests/{id}/results endpoint routing."""
+        
+        test_id = str(uuid4())
+        response = await client.get(f"/api/v1/backtests/{test_id}/results")
+        
+        # Should route correctly
+        assert response.status_code != 404, "Backtest results endpoint not routed properly"
+    
+    @pytest.mark.asyncio
+    async def test_cancel_backtest_endpoint_routing(self, client):
+        """Test POST /api/v1/backtests/{id}/cancel endpoint routing."""
+        
+        test_id = str(uuid4())
+        response = await client.post(f"/api/v1/backtests/{test_id}/cancel")
+        
+        # Should route correctly
+        assert response.status_code != 404, "Cancel backtest endpoint not routed properly"
+    
+    @pytest.mark.asyncio
+    async def test_delete_backtest_endpoint_routing(self, client):
+        """Test DELETE /api/v1/backtests/{id} endpoint routing."""
+        
+        test_id = str(uuid4())
+        response = await client.delete(f"/api/v1/backtests/{test_id}")
+        
+        # Should route correctly
+        assert response.status_code != 404, "Delete backtest endpoint not routed properly"
+
+
+class TestAPIImportsFix:
+    """Test that our import path fixes actually work."""
+    
+    @pytest.mark.asyncio
+    async def test_fastapi_app_creates_successfully(self, app):
+        """Test that FastAPI app creates without import errors."""
+        
+        assert app is not None
+        assert hasattr(app, 'routes')
+        assert len(app.routes) > 0, "App should have routes"
+    
+    @pytest.mark.asyncio
+    async def test_backtesting_router_included(self, app):
+        """Test that backtesting router is included in app."""
+        
+        # Check if backtesting routes are present
+        routes = [route.path for route in app.routes if hasattr(route, 'path')]
+        
+        backtest_routes = [r for r in routes if '/backtests' in r]
+        assert len(backtest_routes) > 0, "Backtesting routes should be included"
+    
+    @pytest.mark.asyncio
+    async def test_all_api_v1_routes_included(self, app):
+        """Test that all v1 API routes are included."""
+        
+        routes = [route.path for route in app.routes if hasattr(route, 'path')]
+        
+        # Should have API v1 routes
+        api_routes = [r for r in routes if r.startswith('/api/v1/')]
+        assert len(api_routes) > 0, "API v1 routes should be included"
+        
+        print(f"Found {len(api_routes)} API v1 routes:")
+        for route in api_routes[:10]:  # Show first 10
+            print(f"  {route}")
+
+
+class TestBacktestEndpointsLogic:
+    """Test actual backtesting endpoint logic (may have business logic failures)."""
+    
+    @pytest.mark.asyncio
+    async def test_invalid_backtest_request_validation(self, client):
+        """Test that invalid requests are properly validated."""
+        
+        invalid_request = {
+            "name": "",  # Invalid: empty name
+            "config": {
+                "initial_capital": "-1000"  # Invalid: negative capital
+            }
+        }
+        
+        response = await client.post("/api/v1/backtests", json=invalid_request)
+        
+        # Should return validation error
+        assert response.status_code == 422
+        
+        error_data = response.json()
+        assert "detail" in error_data
+    
+    @pytest.mark.asyncio
+    async def test_malformed_json_request(self, client):
+        """Test that malformed JSON is handled properly."""
+        
+        response = await client.post(
+            "/api/v1/backtests",
+            content="invalid json",
+            headers={"content-type": "application/json"}
+        )
+        
+        # Should return error for malformed JSON
+        assert response.status_code == 422
+    
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_backtest(self, client):
+        """Test getting a backtest that doesn't exist."""
+        
+        nonexistent_id = str(uuid4())
+        response = await client.get(f"/api/v1/backtests/{nonexistent_id}")
+        
+        # Should return 404 or handle gracefully
+        assert response.status_code in [404, 500]  # Could be 500 if database issues
+    
+    @pytest.mark.asyncio
+    async def test_invalid_uuid_format(self, client):
+        """Test endpoint with invalid UUID format."""
+        
+        response = await client.get("/api/v1/backtests/not-a-uuid")
+        
+        # Should return validation error
+        assert response.status_code == 422

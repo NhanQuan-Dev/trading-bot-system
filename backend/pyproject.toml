@@ -1,0 +1,82 @@
+[tool.poetry]
+name = "trading-bot-platform"
+version = "0.1.0"
+description = "Advanced Trading Bot Platform with DDD Architecture"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "trading", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+# Web Framework
+fastapi = "^0.104.0"
+uvicorn = {extras = ["standard"], version = "^0.24.0"}
+python-dotenv = "^1.0.0"
+pydantic = "^2.0.0"
+pydantic-settings = "^2.0.0"
+pyyaml = "^6.0"
+
+# Database
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.0"}
+alembic = "^1.12.0"
+asyncpg = "^0.29.0"
+psycopg2-binary = "^2.9.9"
+
+# Caching & Queue
+redis = {extras = ["hiredis"], version = "^5.0.0"}
+
+# Exchange APIs
+websockets = "^11.0"
+requests = "^2.31.0"
+httpx = "^0.25.0"
+
+# Crypto & Security
+cryptography = "^41.0.0"
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+
+# Performance
+orjson = "^3.9.0"
+ujson = "^5.8.0"
+
+# Utilities
+python-dateutil = "^2.8.2"
+pytz = "^2023.3"
+
+# Optional performance
+sortedcontainers = {version = "^2.4.0", optional = true}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+pytest-cov = "^4.1.0"
+black = "^23.0.0"
+ruff = "^0.1.0"
+mypy = "^1.7.0"
+
+[tool.poetry.extras]
+performance = ["orjson", "sortedcontainers", "pysimdjson", "pympler"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

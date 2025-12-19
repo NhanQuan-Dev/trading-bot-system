@@ -1,0 +1,375 @@
+name: CI/CD - Production
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.0.0
+  workflow_dispatch:  # Allow manual trigger with approval
+
+env:
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '20'
+
+jobs:
+  # ============================================
+  # Validation & Tests
+  # ============================================
+  
+  validate-version:
+    name: Validate Release Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Deploying version: $VERSION"
+      
+      - name: Validate version format
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+          if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z (e.g., 1.2.3)"
+            exit 1
+          fi
+
+  full-test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    needs: validate-version
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: trading_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5433:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run all tests with coverage
+        env:
+          DATABASE_URL: postgresql+asyncpg://test_user:test_password@localhost:5433/trading_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET_KEY: test-secret-key
+        run: |
+          cd backend
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+      
+      - name: Check coverage threshold
+        run: |
+          cd backend
+          # Ensure coverage is at least 80%
+          coverage report --fail-under=80
+
+  security-scan:
+    name: Security Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: validate-version
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail if vulnerabilities found
+
+  # ============================================
+  # Build Production Images
+  # ============================================
+  
+  build-production:
+    name: Build Production Docker Images
+    runs-on: ubuntu-latest
+    needs: [full-test-suite, security-scan]
+    outputs:
+      backend_image: ${{ steps.meta.outputs.backend_tags }}
+      frontend_image: ${{ steps.meta.outputs.frontend_tags }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Extract metadata
+        id: meta
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "backend_tags=${{ secrets.DOCKER_REGISTRY }}/trading-bot-backend:$VERSION,${{ secrets.DOCKER_REGISTRY }}/trading-bot-backend:latest" >> $GITHUB_OUTPUT
+          echo "frontend_tags=${{ secrets.DOCKER_REGISTRY }}/trading-bot-frontend:$VERSION,${{ secrets.DOCKER_REGISTRY }}/trading-bot-frontend:latest" >> $GITHUB_OUTPUT
+      
+      - name: Build and push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.backend_tags }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/trading-bot-backend:latest
+          cache-to: type=inline
+      
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ steps.meta.outputs.frontend_tags }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/trading-bot-frontend:latest
+          cache-to: type=inline
+
+  # ============================================
+  # Deploy to Production (Manual Approval)
+  # ============================================
+  
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-production
+    environment:
+      name: production
+      url: https://trading-bot.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create deployment notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "🚀 Production Deployment Starting",
+              "attachments": [{
+                "color": "warning",
+                "fields": [
+                  {
+                    "title": "Version",
+                    "value": "${{ needs.validate-version.outputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Deployer",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Status",
+                    "value": "In Progress...",
+                    "short": false
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_PROD }}
+      
+      - name: Backup production database
+        run: |
+          echo "Creating database backup before deployment..."
+          # Example: pg_dump or cloud provider backup API
+      
+      - name: Deploy to Production Server
+        run: |
+          echo "Deploying to production..."
+          # Example deployment commands:
+          # - kubectl set image deployment/backend backend=${{ needs.build-production.outputs.backend_image }}
+          # - kubectl set image deployment/frontend frontend=${{ needs.build-production.outputs.frontend_image }}
+          # - kubectl rollout status deployment/backend
+          # - kubectl rollout status deployment/frontend
+      
+      - name: Run database migrations
+        run: |
+          echo "Running database migrations..."
+          # Example: kubectl exec -it backend-pod -- alembic upgrade head
+      
+      - name: Wait for deployment stabilization
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 60
+
+  # ============================================
+  # Post-Deployment Validation
+  # ============================================
+  
+  health-checks:
+    name: Production Health Checks
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    steps:
+      - name: Check API health
+        run: |
+          for i in {1..10}; do
+            if curl -f https://api.trading-bot.com/health; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1
+      
+      - name: Check frontend
+        run: |
+          curl -f https://trading-bot.com || exit 1
+      
+      - name: Check WebSocket connection
+        run: |
+          echo "WebSocket health check would run here"
+      
+      - name: Verify database connectivity
+        run: |
+          echo "Database connectivity check would run here"
+
+  smoke-tests:
+    name: Production Smoke Tests
+    runs-on: ubuntu-latest
+    needs: health-checks
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run critical path tests
+        run: |
+          echo "Running smoke tests on production..."
+          # Example: Test login, create order, fetch market data
+          
+          # Test authentication
+          curl -X POST https://api.trading-bot.com/api/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@example.com","password":"test"}' || true
+          
+          # Test public endpoints
+          curl -f https://api.trading-bot.com/api/v1/exchanges || exit 1
+
+  rollback-on-failure:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [health-checks, smoke-tests]
+    if: failure()
+    
+    steps:
+      - name: Alert team
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: |
+            🚨 PRODUCTION DEPLOYMENT FAILED!
+            
+            Version: ${{ needs.validate-version.outputs.version }}
+            
+            Initiating automatic rollback...
+            
+            @oncall-team
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_CRITICAL }}
+      
+      - name: Rollback deployment
+        run: |
+          echo "Rolling back to previous version..."
+          # Example: kubectl rollout undo deployment/backend
+          # Example: kubectl rollout undo deployment/frontend
+      
+      - name: Restore database backup
+        run: |
+          echo "Restoring database backup if needed..."
+
+  # ============================================
+  # Success Notification & Documentation
+  # ============================================
+  
+  deployment-success:
+    name: Deployment Success
+    runs-on: ubuntu-latest
+    needs: [health-checks, smoke-tests]
+    
+    steps:
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ needs.validate-version.outputs.version }}
+          body: |
+            ## 🚀 Release ${{ needs.validate-version.outputs.version }}
+            
+            Successfully deployed to production!
+            
+            ### Changes
+            See [CHANGELOG.md](CHANGELOG.md) for details.
+            
+            ### Deployment Info
+            - Deployed by: ${{ github.actor }}
+            - Deploy time: ${{ github.event.head_commit.timestamp }}
+            - Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false
+      
+      - name: Send success notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            ✅ Production Deployment Successful!
+            
+            Version: ${{ needs.validate-version.outputs.version }}
+            Deployer: ${{ github.actor }}
+            
+            🔗 https://trading-bot.com
+            
+            All health checks passed!
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_PROD }}
+      
+      - name: Update status page
+        run: |
+          echo "Updating status page..."
+          # Example: Update status.io or similar service

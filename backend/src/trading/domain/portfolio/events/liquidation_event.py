@@ -1,0 +1,29 @@
+"""Liquidation Event."""
+from dataclasses import dataclass
+from decimal import Decimal
+from datetime import datetime, timezone
+from typing import Optional
+import uuid
+
+from ..value_objects import PositionSide
+
+
+@dataclass(frozen=True)
+class LiquidationEvent:
+    """Event raised when position is liquidated."""
+    event_id: uuid.UUID
+    occurred_at: datetime
+    position_id: uuid.UUID
+    user_id: uuid.UUID
+    bot_id: Optional[uuid.UUID]
+    symbol: str
+    side: PositionSide
+    liquidation_price: Decimal
+    quantity: Decimal
+    loss_amount: Decimal
+    
+    def __post_init__(self):
+        if not self.event_id:
+            object.__setattr__(self, 'event_id', uuid.uuid4())
+        if not self.occurred_at:
+            object.__setattr__(self, 'occurred_at', datetime.now(timezone.utc))

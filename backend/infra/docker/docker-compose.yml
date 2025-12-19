@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 15 Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: trading-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: trading_platform
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis 7 Cache & Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: trading-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # PgAdmin for Database Management (optional)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: trading-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@trading.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # Application (optional - for future use)
+  # app:
+  #   build:
+  #     context: ../..
+  #     dockerfile: infra/docker/Dockerfile.app
+  #   container_name: trading-app
+  #   environment:
+  #     - ENVIRONMENT=development
+  #     - DATABASE_URL=postgresql+asyncpg://postgres:postgres123@postgres:5432/trading_platform
+  #     - DATABASE_SYNC_URL=postgresql+psycopg2://postgres:postgres123@postgres:5432/trading_platform
+  #     - REDIS_URL=redis://redis:6379/0
+  #   volumes:
+  #     - ../../src:/app/src
+  #     - ../../config:/app/config
+  #     - ../../logs:/app/logs
+  #   ports:
+  #     - "8000:8000"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  pgadmin-data:

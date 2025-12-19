@@ -1,0 +1,47 @@
+# Trading Configuration
+trading:
+  # Default risk parameters
+  risk:
+    max_position_size: 0.1  # 10% of portfolio
+    max_drawdown: 0.2       # 20% max drawdown
+    max_leverage: 3
+    stop_loss_pct: 0.02     # 2% default stop loss
+    take_profit_pct: 0.05   # 5% default take profit
+
+  # Execution settings
+  execution:
+    default_order_type: "LIMIT"
+    default_time_in_force: "GTC"
+    slippage_tolerance: 0.001  # 0.1%
+    retry_attempts: 3
+    retry_delay: 1.0  # seconds
+
+  # Market data
+  marketdata:
+    default_timeframe: "1m"
+    candle_history_limit: 1000
+    tick_buffer_size: 10000
+    orderbook_depth: 20
+
+  # Strategy defaults
+  strategy:
+    default_capital: 10000
+    default_commission: 0.001  # 0.1%
+    enable_paper_trading: true
+    signal_cooldown: 60  # seconds
+
+# Exchange specific settings
+exchanges:
+  binance:
+    rest_base: "https://api.binance.com"
+    ws_base: "wss://stream.binance.com:9443"
+    testnet_rest: "https://testnet.binance.vision"
+    testnet_ws: "wss://testnet.binance.vision"
+    rate_limit: 1200  # requests per minute
+    
+  bybit:
+    rest_base: "https://api.bybit.com"
+    ws_base: "wss://stream.bybit.com"
+    testnet_rest: "https://api-testnet.bybit.com"
+    testnet_ws: "wss://stream-testnet.bybit.com"
+    rate_limit: 600

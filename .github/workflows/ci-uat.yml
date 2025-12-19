@@ -1,0 +1,215 @@
+name: CI/CD - UAT (Staging)
+
+on:
+  push:
+    branches: [ uat, staging ]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '20'
+
+jobs:
+  # Reuse tests from develop workflow
+  backend-test:
+    name: Backend - Full Test Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: trading_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5433:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run all tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://test_user:test_password@localhost:5433/trading_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET_KEY: test-secret-key-for-ci
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml
+
+  frontend-test:
+    name: Frontend - Full Test Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run linter
+        run: npm run lint
+      
+      - name: Build
+        run: npm run build
+
+  # ============================================
+  # Deploy to UAT
+  # ============================================
+  
+  deploy-uat:
+    name: Deploy to UAT Environment
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test]
+    environment:
+      name: uat
+      url: https://uat.trading-bot.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      
+      - name: Build and push Backend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/trading-bot-backend:uat
+            ${{ secrets.DOCKER_REGISTRY }}/trading-bot-backend:uat-${{ github.sha }}
+      
+      - name: Build and push Frontend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/trading-bot-frontend:uat
+            ${{ secrets.DOCKER_REGISTRY }}/trading-bot-frontend:uat-${{ github.sha }}
+      
+      # Deploy to UAT server
+      # - name: Deploy to UAT Server
+      #   uses: appleboy/ssh-action@master
+      #   with:
+      #     host: ${{ secrets.UAT_SERVER_HOST }}
+      #     username: ${{ secrets.UAT_SERVER_USER }}
+      #     key: ${{ secrets.UAT_SERVER_SSH_KEY }}
+      #     script: |
+      #       cd /opt/trading-bot
+      #       docker-compose -f docker-compose.uat.yml pull
+      #       docker-compose -f docker-compose.uat.yml up -d
+      
+      - name: Run database migrations
+        run: |
+          echo "Running database migrations on UAT..."
+          # Example: kubectl exec or SSH command to run alembic upgrade head
+      
+      - name: Send notification to QA team
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            🚀 UAT Deployment Complete!
+            Environment: UAT
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+            
+            Please start testing: https://uat.trading-bot.com
+            
+            @qa-team
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_QA }}
+
+  # ============================================
+  # E2E Tests on UAT
+  # ============================================
+  
+  e2e-tests:
+    name: E2E Tests on UAT
+    runs-on: ubuntu-latest
+    needs: deploy-uat
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Wait for UAT to be ready
+        run: |
+          sleep 60
+          curl -f https://uat.trading-bot.com/health || exit 1
+      
+      # - name: Run Playwright E2E tests
+      #   run: |
+      #     cd e2e
+      #     npm ci
+      #     npx playwright test --config=uat.config.js
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: e2e/test-results/
+
+  # ============================================
+  # Performance Tests
+  # ============================================
+  
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy-uat
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      # - name: Run load tests with k6
+      #   run: |
+      #     docker run --rm -v $(pwd)/tests/performance:/scripts \
+      #       grafana/k6 run /scripts/load-test.js \
+      #       -e BASE_URL=https://uat.trading-bot.com
+      
+      - name: Performance test placeholder
+        run: echo "Performance tests would run here"

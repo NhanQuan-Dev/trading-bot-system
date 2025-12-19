@@ -1,0 +1,17 @@
+nohup: ignoring input
+INFO:     Started server process [1804045]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:49670 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /api/docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46982 - "GET /api/openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36662 - "GET /api/openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56758 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59954 - "GET /api/v1/strategies/types/ HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:60674 - "GET /api/docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60680 - "GET /api/openapi.json HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1804045]
