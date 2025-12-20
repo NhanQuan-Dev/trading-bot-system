@@ -39,7 +39,7 @@ class BacktestEngine:
             slippage_model=config.slippage_model,
             slippage_percent=config.slippage_percent,
             commission_model=config.commission_model,
-            commission_rate=config.commission_rate,
+            commission_rate=config.commission_percent,  # Note: MarketSimulator param is commission_rate
         )
         
         # State
@@ -78,16 +78,24 @@ class BacktestEngine:
         
         try:
             # Process each candle
+            total_candles = len(candles)
+            
             for idx, candle in enumerate(candles):
+                self.total_bars_processed += 1
+                
+                # Process candle
                 self._process_candle(candle, strategy_func, idx)
                 
                 # Update progress
-                if progress_callback and idx % 100 == 0:
-                    progress_percent = int((idx / len(candles)) * 100)
-                    backtest_run.update_progress(progress_percent)
-                    await progress_callback(progress_percent)
+                if progress_callback and idx % 10 == 0:
+                    percent = int((idx / total_candles) * 100)
+                    backtest_run.update_progress(percent)
+                    await progress_callback(percent)
                 
-                self.total_bars_processed += 1
+                # Log every 50 candles
+                # Log every 50 candles
+                if idx % 50 == 0:
+                    logger.debug(f"Progress: {idx}/{total_candles} candles | Signals: {self.signals_generated} | Trades: {len(self.trades)}")
             
             # Close any open position
             if self.current_position:
@@ -110,21 +118,18 @@ class BacktestEngine:
             
             # Create results
             results = BacktestResults(
+                start_date=candles[0]["timestamp"] if isinstance(candles[0]["timestamp"], datetime) else datetime.fromisoformat(candles[0]["timestamp"]),
+                end_date=candles[-1]["timestamp"] if isinstance(candles[-1]["timestamp"], datetime) else datetime.fromisoformat(candles[-1]["timestamp"]),
+                duration_days=duration_days,
                 initial_capital=self.config.initial_capital,
                 final_equity=self.equity,
                 peak_equity=self.peak_equity,
-                total_trades=len(self.trades),
+                metrics=metrics,  # Changed from performance_metrics
                 equity_curve=self.equity_curve,
                 trades=self.trades,
-                performance_metrics=metrics,
             )
             
-            backtest_run.complete(
-                final_equity=self.equity,
-                total_trades=len(self.trades),
-                win_rate=metrics.win_rate,
-                total_return=metrics.total_return,
-            )
+            backtest_run.complete(results)
             
             logger.info(f"Backtest completed: {len(self.trades)} trades, {metrics.total_return}% return")
             return results
@@ -162,6 +167,7 @@ class BacktestEngine:
         
         if signal:
             self.signals_generated += 1
+            logger.debug(f"Signal #{self.signals_generated} at idx={candle_idx}: {signal['type']}")
             self._process_signal(signal, candle)
         
         # Update equity curve
@@ -218,13 +224,15 @@ class BacktestEngine:
         
         # Create position
         self.current_position = BacktestPosition(
+            symbol=self.config.symbol,
             direction=TradeDirection.LONG,
-            entry_price=fill.filled_price,
             quantity=fill.filled_quantity,
-            entry_time=timestamp,
-            stop_loss=signal.get("stop_loss"),
-            take_profit=signal.get("take_profit"),
+            avg_entry_price=fill.filled_price,
         )
+        # Store stop loss/take profit separately if needed
+        self.current_position.stop_loss = signal.get("stop_loss")
+        self.current_position.take_profit = signal.get("take_profit")
+        self.current_position.entry_time = timestamp
         
         # Deduct cost from equity
         cost = fill.filled_price * fill.filled_quantity + fill.commission
@@ -256,13 +264,15 @@ class BacktestEngine:
         
         # Create position
         self.current_position = BacktestPosition(
+            symbol=self.config.symbol,
             direction=TradeDirection.SHORT,
-            entry_price=fill.filled_price,
             quantity=fill.filled_quantity,
-            entry_time=timestamp,
-            stop_loss=signal.get("stop_loss"),
-            take_profit=signal.get("take_profit"),
+            avg_entry_price=fill.filled_price,
         )
+        # Store stop loss/take profit separately if needed
+        self.current_position.stop_loss = signal.get("stop_loss")
+        self.current_position.take_profit = signal.get("take_profit")
+        self.current_position.entry_time = timestamp
         
         # Add proceeds to equity
         proceeds = fill.filled_price * fill.filled_quantity - fill.commission
@@ -302,26 +312,37 @@ class BacktestEngine:
         
         # Calculate P&L
         if self.current_position.direction == TradeDirection.LONG:
-            pnl = (fill.filled_price - self.current_position.entry_price) * fill.filled_quantity
+            pnl = (fill.filled_price - self.current_position.avg_entry_price) * fill.filled_quantity
             self.equity += fill.filled_price * fill.filled_quantity - fill.commission
         else:
-            pnl = (self.current_position.entry_price - fill.filled_price) * fill.filled_quantity
+            pnl = (self.current_position.avg_entry_price - fill.filled_price) * fill.filled_quantity
             self.equity -= fill.filled_price * fill.filled_quantity + fill.commission
+        
+        # Calculate net P&L and percentage
+        total_costs = fill.commission + fill.slippage
+        net_pnl = pnl - total_costs
+        
+        entry_value = self.current_position.avg_entry_price * fill.filled_quantity
+        pnl_percent = (net_pnl / entry_value) * Decimal("100") if entry_value > 0 else Decimal("0")
         
         # Create trade record
         trade = BacktestTrade(
             symbol=self.config.symbol,
             direction=self.current_position.direction,
-            entry_price=self.current_position.entry_price,
+            entry_price=self.current_position.avg_entry_price,
             exit_price=fill.filled_price,
-            quantity=fill.filled_quantity,
-            entry_time=self.current_position.entry_time,
-            exit_time=timestamp,
+            entry_quantity=fill.filled_quantity,  # Changed from 'quantity'
+            entry_time=self.current_position.entry_time if hasattr(self.current_position, 'entry_time') else datetime.utcnow(),
+            exit_time=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
             gross_pnl=pnl,
-            commission=fill.commission,
-            slippage=fill.slippage,
+            net_pnl=net_pnl,
+            pnl_percent=pnl_percent,
+            entry_commission=Decimal("0"),  # Not tracked separately
+            exit_commission=fill.commission,
+            entry_slippage=Decimal("0"),  # Not tracked separately  
+            exit_slippage=fill.slippage,
         )
-        trade.close(fill.filled_price, timestamp, fill.commission, fill.slippage)
+        # Trade is complete - no need to call close()
         
         self.trades.append(trade)
         self.current_position = None
@@ -362,8 +383,8 @@ class BacktestEngine:
         """Calculate position size based on sizing method."""
         
         # Use config position sizing
-        if self.config.position_size_percent:
-            capital_to_use = self.equity * (self.config.position_size_percent / Decimal("100"))
+        if self.config.position_size_value:
+            capital_to_use = self.equity * self.config.position_size_value  # Already in decimal form (0.1 = 10%)
             quantity = capital_to_use / price
             return quantity
         
@@ -385,9 +406,17 @@ class BacktestEngine:
         # Calculate return
         return_percent = ((total_equity - self.config.initial_capital) / self.config.initial_capital * Decimal("100"))
         
+        # Calculate positions value
+        positions_value = Decimal("0")
+        if self.current_position:
+            positions_value = self.current_position.quantity * current_price
+        
         point = EquityCurvePoint(
             timestamp=timestamp,
             equity=total_equity,
+            cash=self.equity,  # Current cash balance
+            positions_value=positions_value,  # Value of open positions
+            drawdown=drawdown_amount,  # Drawdown amount
             drawdown_percent=drawdown_percent,
             return_percent=return_percent,
         )

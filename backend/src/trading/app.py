@@ -41,12 +41,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Error starting job services: {e}")
 
+    # Create tables if they don't exist
+    from .infrastructure.persistence.database import async_engine, Base
+    from .infrastructure.persistence import models  # Ensure models are imported
+    
+    try:
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Error creating database tables: {e}")
+
     # Seed initial data
     from .infrastructure.persistence.database import get_db_context
     from .infrastructure.persistence.seed_exchanges import seed_exchanges
+    from .infrastructure.persistence.seed_users import seed_users
+    from .infrastructure.persistence.seed_strategies import seed_strategies
     
     try:
         async with get_db_context() as session:
+            await seed_users(session)
+            await seed_strategies(session)
             await seed_exchanges(session)
             logger.info("Database seeded successfully")
     except Exception as e:

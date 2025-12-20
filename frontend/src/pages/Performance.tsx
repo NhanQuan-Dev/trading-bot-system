@@ -1,52 +1,189 @@
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useAppStore } from '@/lib/store';
-import { 
+import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, LineChart, Line, Area, AreaChart
+  PieChart, Pie, Cell, Area, AreaChart
 } from 'recharts';
 import { TrendingUp, TrendingDown, Target, Percent, Activity, DollarSign } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useEffect, useState } from 'react';
 
-const monthlyData = [
-  { month: 'Jan', pnl: 1250 },
-  { month: 'Feb', pnl: 890 },
-  { month: 'Mar', pnl: -320 },
-  { month: 'Apr', pnl: 1560 },
-  { month: 'May', pnl: 2100 },
-  { month: 'Jun', pnl: 1890 },
-];
+// API Response Interfaces
+interface PerformanceOverview {
+  total_return_pct: number;
+  sharpe_ratio: number;
+  sortino_ratio: number;
+  max_drawdown: number;
+  calmar_ratio: number;
+  win_rate: number;
+  profit_factor: number;
+}
 
-const tradeDistribution = [
-  { name: 'Win', value: 156, color: 'hsl(142, 76%, 46%)' },
-  { name: 'Loss', value: 68, color: 'hsl(0, 72%, 55%)' },
-];
+interface MonthlyPerformance {
+  month: string;
+  return_pct: number;
+  trades_count: number;
+  win_rate: number;
+}
 
-const drawdownData = Array.from({ length: 30 }, (_, i) => ({
-  day: i + 1,
-  drawdown: -Math.random() * 8
-}));
+interface DailyReturn {
+  date: string;
+  return_pct: number;
+  cumulative_return_pct: number;
+}
+
+interface BotPerformance {
+  bot_id: string; // Backend might send int but safely handle as string/number
+  bot_name: string;
+  total_pnl: number;
+  win_rate: number;
+  sharpe_ratio: number;
+  trades_count: number;
+}
 
 export default function Performance() {
-  const bots = useAppStore((state) => state.bots);
-  const trades = useAppStore((state) => state.trades);
+  const [loading, setLoading] = useState(true);
+  const [overview, setOverview] = useState<PerformanceOverview | null>(null);
+  const [monthlyData, setMonthlyData] = useState<MonthlyPerformance[]>([]);
+  const [dailyReturns, setDailyReturns] = useState<DailyReturn[]>([]);
+  const [botPerformance, setBotPerformance] = useState<BotPerformance[]>([]);
+  const [tradeDistribution, setTradeDistribution] = useState<{ name: string, value: number, color: string }[]>([]);
+  const [drawdownData, setDrawdownData] = useState<{ date: string, drawdown: number }[]>([]);
 
-  const totalPnL = bots.reduce((sum, bot) => sum + bot.pnl, 0);
-  const avgWinRate = bots.reduce((sum, bot) => sum + bot.winRate, 0) / bots.length;
-  const totalTrades = bots.reduce((sum, bot) => sum + bot.totalTrades, 0);
-  const maxDrawdown = -5.2;
-  const sharpeRatio = 1.85;
-  const profitFactor = 2.3;
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        // Fetch all required data in parallel
+        const [overviewRes, monthlyRes, dailyRes, botRes] = await Promise.all([
+          fetch('/api/performance/overview'),
+          fetch('/api/performance/returns/monthly?months=12'),
+          fetch('/api/performance/returns/daily?days=90'),
+          fetch('/api/performance/metrics/by-bot')
+        ]);
 
+        if (overviewRes.ok) {
+          const data = await overviewRes.json();
+          setOverview(data);
+        }
+
+        let totalTrades = 0;
+        if (monthlyRes.ok) {
+          const data: MonthlyPerformance[] = await monthlyRes.json();
+          setMonthlyData(data);
+          totalTrades = data.reduce((sum, item) => sum + item.trades_count, 0);
+        }
+
+        if (dailyRes.ok) {
+          const data: DailyReturn[] = await dailyRes.json();
+          setDailyReturns(data);
+
+          // Calculate drawdown curve
+          let peak = -Infinity;
+          const drawdowns = data.map(d => {
+            // Assuming cumulative_return_pct starts around 0
+            // Equity approximation: 100 * (1 + ret/100)
+            const equity = 100 * (1 + d.cumulative_return_pct / 100);
+            if (equity > peak) peak = equity;
+            const dd = peak === 0 ? 0 : ((equity - peak) / peak) * 100;
+            return {
+              date: d.date,
+              drawdown: dd
+            };
+          });
+          setDrawdownData(drawdowns);
+        }
+
+        if (botRes.ok) {
+          const data = await botRes.json();
+          setBotPerformance(data);
+        }
+
+        // Calculate trade distribution if we have total trades and win rate
+        // If overview is available, use its win rate. Otherwise derive from monthly if possible.
+        // We need 'await' for json() so overview might be set effectively in next render, 
+        // but here we are in same closure. We used separate awaits above but didn't assign to vars early enough?
+        // Actually Promise.all returns responses, we parse them sequentially.
+        // Let's rely on the parsed data locally.
+
+      } catch (error) {
+        console.error("Failed to fetch performance data:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  // Effect to update derived state like distribution once data is loaded
+  useEffect(() => {
+    if (overview && monthlyData.length > 0) {
+      const totalTrades = monthlyData.reduce((sum, m) => sum + m.trades_count, 0);
+      const winRate = overview.win_rate / 100;
+      const wins = Math.round(totalTrades * winRate);
+      const losses = totalTrades - wins;
+
+      setTradeDistribution([
+        { name: 'Win', value: wins, color: 'hsl(142, 76%, 46%)' },
+        { name: 'Loss', value: losses, color: 'hsl(0, 72%, 55%)' },
+      ]);
+    }
+  }, [overview, monthlyData]);
+
+  // Derived metrics for UI
   const metrics = [
-    { label: 'Total P&L', value: `$${totalPnL.toFixed(2)}`, icon: DollarSign, positive: totalPnL >= 0 },
-    { label: 'Win Rate', value: `${avgWinRate.toFixed(1)}%`, icon: Target, positive: avgWinRate >= 50 },
-    { label: 'Sharpe Ratio', value: sharpeRatio.toFixed(2), icon: Activity, positive: sharpeRatio >= 1 },
-    { label: 'Max Drawdown', value: `${maxDrawdown.toFixed(1)}%`, icon: TrendingDown, positive: false },
-    { label: 'Profit Factor', value: profitFactor.toFixed(2), icon: Percent, positive: profitFactor >= 1.5 },
-    { label: 'Total Trades', value: totalTrades.toString(), icon: TrendingUp, positive: true },
+    {
+      label: 'Total Return',
+      value: overview ? `${overview.total_return_pct >= 0 ? '+' : ''}${overview.total_return_pct.toFixed(2)}%` : '0.00%',
+      icon: DollarSign,
+      positive: (overview?.total_return_pct || 0) >= 0
+    },
+    {
+      label: 'Win Rate',
+      value: overview ? `${overview.win_rate.toFixed(1)}%` : '0.0%',
+      icon: Target,
+      positive: (overview?.win_rate || 0) >= 50
+    },
+    {
+      label: 'Sharpe Ratio',
+      value: overview ? overview.sharpe_ratio.toFixed(2) : '0.00',
+      icon: Activity,
+      positive: (overview?.sharpe_ratio || 0) >= 1
+    },
+    {
+      label: 'Max Drawdown',
+      value: overview ? `${overview.max_drawdown.toFixed(1)}%` : '0.0%',
+      icon: TrendingDown,
+      positive: false
+    },
+    {
+      label: 'Profit Factor',
+      value: overview ? overview.profit_factor.toFixed(2) : '0.00',
+      icon: Percent,
+      positive: (overview?.profit_factor || 0) >= 1.5
+    },
+    {
+      label: 'Total Trades',
+      value: monthlyData.reduce((acc, m) => acc + m.trades_count, 0).toString(),
+      icon: TrendingUp,
+      positive: true
+    },
   ];
+
+  if (loading) {
+    return (
+      <DashboardLayout>
+        <div className="flex items-center justify-center p-12">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+            <p className="text-muted-foreground">Loading performance metrics...</p>
+          </div>
+        </div>
+      </DashboardLayout>
+    )
+  }
 
   return (
     <DashboardLayout>
@@ -83,7 +220,7 @@ export default function Performance() {
         {/* Charts */}
         <Tabs defaultValue="monthly" className="space-y-4">
           <TabsList className="bg-muted">
-            <TabsTrigger value="monthly">Monthly P&L</TabsTrigger>
+            <TabsTrigger value="monthly">Monthly Returns</TabsTrigger>
             <TabsTrigger value="distribution">Trade Distribution</TabsTrigger>
             <TabsTrigger value="drawdown">Drawdown</TabsTrigger>
           </TabsList>
@@ -91,7 +228,7 @@ export default function Performance() {
           <TabsContent value="monthly">
             <Card className="border-border bg-card">
               <CardHeader>
-                <CardTitle>Monthly P&L</CardTitle>
+                <CardTitle>Monthly Performance</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="h-[350px]">
@@ -99,7 +236,7 @@ export default function Performance() {
                     <BarChart data={monthlyData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 15%, 20%)" />
                       <XAxis dataKey="month" stroke="hsl(215, 15%, 60%)" />
-                      <YAxis stroke="hsl(215, 15%, 60%)" tickFormatter={(v) => `$${v}`} />
+                      <YAxis stroke="hsl(215, 15%, 60%)" tickFormatter={(v) => `${v}%`} />
                       <Tooltip
                         contentStyle={{
                           backgroundColor: 'hsl(220, 18%, 12%)',
@@ -107,10 +244,10 @@ export default function Performance() {
                           borderRadius: '8px',
                           color: 'hsl(210, 20%, 98%)'
                         }}
-                        formatter={(value: number) => [`$${value}`, 'P&L']}
+                        formatter={(value: number) => [`${value}%`, 'Return']}
                       />
                       <Bar
-                        dataKey="pnl"
+                        dataKey="return_pct"
                         fill="hsl(142, 76%, 46%)"
                         radius={[4, 4, 0, 0]}
                       />
@@ -127,49 +264,55 @@ export default function Performance() {
                 <CardTitle>Win/Loss Distribution</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="flex items-center justify-center">
-                  <div className="h-[350px] w-[350px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={tradeDistribution}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={80}
-                          outerRadius={140}
-                          paddingAngle={2}
-                          dataKey="value"
-                        >
-                          {tradeDistribution.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: 'hsl(220, 18%, 12%)',
-                            border: '1px solid hsl(220, 15%, 20%)',
-                            borderRadius: '8px',
-                            color: 'hsl(210, 20%, 98%)'
-                          }}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <div className="space-y-4">
-                    {tradeDistribution.map((item) => (
-                      <div key={item.name} className="flex items-center gap-3">
-                        <div
-                          className="h-4 w-4 rounded"
-                          style={{ backgroundColor: item.color }}
-                        />
-                        <div>
-                          <p className="font-medium text-foreground">{item.name}</p>
-                          <p className="text-sm text-muted-foreground">{item.value} trades</p>
+                {tradeDistribution.length > 0 ? (
+                  <div className="flex items-center justify-center">
+                    <div className="h-[350px] w-[350px]">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={tradeDistribution}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={80}
+                            outerRadius={140}
+                            paddingAngle={2}
+                            dataKey="value"
+                          >
+                            {tradeDistribution.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={entry.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: 'hsl(220, 18%, 12%)',
+                              border: '1px solid hsl(220, 15%, 20%)',
+                              borderRadius: '8px',
+                              color: 'hsl(210, 20%, 98%)'
+                            }}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="space-y-4">
+                      {tradeDistribution.map((item) => (
+                        <div key={item.name} className="flex items-center gap-3">
+                          <div
+                            className="h-4 w-4 rounded"
+                            style={{ backgroundColor: item.color }}
+                          />
+                          <div>
+                            <p className="font-medium text-foreground">{item.name}</p>
+                            <p className="text-sm text-muted-foreground">{item.value} trades</p>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex h-[350px] items-center justify-center text-muted-foreground">
+                    No trade data available
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -185,13 +328,13 @@ export default function Performance() {
                     <AreaChart data={drawdownData}>
                       <defs>
                         <linearGradient id="colorDrawdown" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="hsl(0, 72%, 55%)" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="hsl(0, 72%, 55%)" stopOpacity={0}/>
+                          <stop offset="5%" stopColor="hsl(0, 72%, 55%)" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="hsl(0, 72%, 55%)" stopOpacity={0} />
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 15%, 20%)" />
-                      <XAxis dataKey="day" stroke="hsl(215, 15%, 60%)" />
-                      <YAxis stroke="hsl(215, 15%, 60%)" tickFormatter={(v) => `${v}%`} />
+                      <XAxis dataKey="date" stroke="hsl(215, 15%, 60%)" />
+                      <YAxis stroke="hsl(215, 15%, 60%)" tickFormatter={(v) => `${v.toFixed(1)}%`} />
                       <Tooltip
                         contentStyle={{
                           backgroundColor: 'hsl(220, 18%, 12%)',
@@ -215,53 +358,6 @@ export default function Performance() {
             </Card>
           </TabsContent>
         </Tabs>
-
-        {/* Trade Journal */}
-        <Card className="border-border bg-card">
-          <CardHeader>
-            <CardTitle>Recent Trades</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {trades.map((trade) => (
-                <div
-                  key={trade.id}
-                  className="flex items-center justify-between rounded-lg border border-border bg-background/50 p-4"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className={cn(
-                      "flex h-10 w-10 items-center justify-center rounded-lg",
-                      trade.side === 'buy' ? "bg-primary/10" : "bg-destructive/10"
-                    )}>
-                      {trade.side === 'buy' ? (
-                        <TrendingUp className="h-5 w-5 text-primary" />
-                      ) : (
-                        <TrendingDown className="h-5 w-5 text-destructive" />
-                      )}
-                    </div>
-                    <div>
-                      <p className="font-medium text-foreground">{trade.symbol}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {trade.side.toUpperCase()} • {trade.quantity} @ ${trade.price.toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className={cn(
-                      "font-mono font-semibold",
-                      trade.pnl >= 0 ? "text-primary" : "text-destructive"
-                    )}>
-                      {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(trade.timestamp).toLocaleString()}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
       </div>
     </DashboardLayout>
   );

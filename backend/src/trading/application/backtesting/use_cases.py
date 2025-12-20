@@ -37,8 +37,14 @@ class RunBacktestUseCase:
         self,
         user_id: UUID,
         strategy_id: UUID,
+
         config: BacktestConfig,
+        symbol: str,
+        timeframe: str,
+        start_date: datetime,
+        end_date: datetime,
         strategy_func,  # Strategy function that generates signals
+        backtest_run_id: UUID = None,  # Optional: use existing run to prevent duplicate
     ) -> BacktestRun:
         """
         Run backtest.
@@ -53,25 +59,36 @@ class RunBacktestUseCase:
             BacktestRun entity with execution tracking
         """
         
-        # Create backtest run
-        backtest_run = BacktestRun(
-            user_id=user_id,
-            strategy_id=strategy_id,
-            config=config,
-        )
-        
-        # Save initial state
-        await self.repository.save(backtest_run)
+        # Load existing or create new backtest run
+        if backtest_run_id:
+            # Load existing backtest run
+            backtest_run = await self.repository.get_by_id(backtest_run_id)
+            if not backtest_run:
+                raise ValueError(f"Backtest run {backtest_run_id} not found")
+        else:
+            # Create new backtest run
+            backtest_run = BacktestRun(
+                user_id=user_id,
+                strategy_id=strategy_id,
+                config=config,
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            # Save initial state
+            await self.repository.save(backtest_run)
         
         try:
             # Fetch historical data
-            logger.info(f"Fetching historical data for {config.symbol} from {config.start_date} to {config.end_date}")
+            logger.info(f"Fetching historical data for {symbol} from {start_date} to {end_date}")
             candles = await self.market_data_service.get_historical_candles(
-                symbol=config.symbol,
-                timeframe=config.timeframe,
-                start_date=config.start_date,
-                end_date=config.end_date,
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
             )
+            logger.info(f"Fetched {len(candles) if candles else 0} candles")
             
             if not candles:
                 raise ValueError("No historical data available for specified period")
@@ -84,7 +101,7 @@ class RunBacktestUseCase:
                     slippage_model=config.slippage_model,
                     slippage_percent=config.slippage_percent,
                     commission_model=config.commission_model,
-                    commission_rate=config.commission_rate,
+                    commission_rate=config.commission_percent,  # MarketSimulator expects commission_rate param
                 ),
             )
             
@@ -94,12 +111,14 @@ class RunBacktestUseCase:
                 await self.repository.save(backtest_run)
             
             # Run backtest
+            logger.info(f"Running backtest engine with {len(candles)} candles...")
             results = await engine.run_backtest(
                 candles=candles,
                 strategy_func=strategy_func,
                 backtest_run=backtest_run,
                 progress_callback=progress_callback,
             )
+            logger.info("Backtest engine completed")
             
             # Save final state
             await self.repository.save(backtest_run)
@@ -203,7 +222,10 @@ class GetBacktestResultsUseCase:
             }
         
         # Fetch detailed results
-        results = await self.results_service.get_results(backtest_id)
+        results = await self.repository.get_results(backtest_id)
+        
+        if results:
+            results["backtest_run"] = backtest_run
         
         return {
             "backtest_run": backtest_run,

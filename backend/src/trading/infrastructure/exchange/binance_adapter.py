@@ -2,7 +2,7 @@
 import time
 import hmac
 import hashlib
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from decimal import Decimal
 
 from .exchange_gateway import (
@@ -11,7 +11,7 @@ from .exchange_gateway import (
     BalanceData,
     PositionData
 )
-from src.trading.shared.errors.infrastructure_errors import ExchangeAPIError
+from src.trading.shared.errors.infrastructure_errors import ExternalAPIError as ExchangeAPIError
 
 
 class BinanceAdapter(ExchangeGateway):
@@ -112,6 +112,93 @@ class BinanceAdapter(ExchangeGateway):
             return True
         except Exception:
             return False
+    
+    async def create_order(
+        self,
+        symbol: str,
+        side: str,
+        type: str,
+        quantity: Decimal,
+        price: Optional[Decimal] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Create new order"""
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": type,
+            "quantity": str(quantity),
+            **kwargs
+        }
+        
+        if price:
+            params["price"] = str(price)
+            
+        return await self._signed_request("POST", "/fapi/v1/order", params)
+
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Cancel an order"""
+        params = {
+            "symbol": symbol,
+            "orderId": order_id
+        }
+        return await self._signed_request("DELETE", "/fapi/v1/order", params)
+
+    async def get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Get order details"""
+        params = {
+            "symbol": symbol,
+            "orderId": order_id
+        }
+        return await self._signed_request("GET", "/fapi/v1/order", params)
+        
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get open orders"""
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        return await self._signed_request("GET", "/fapi/v1/openOrders", params)
+
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 500
+    ) -> List[List[Any]]:
+        """
+        Get kline/candlestick data from Binance Futures.
+        
+        Args:
+            symbol: Trading symbol (e.g., "BTCUSDT")
+            interval: Kline interval (1m, 5m, 15m, 1h, 4h, 1d, etc.)
+            start_time: Start time in milliseconds
+            end_time: End time in milliseconds
+            limit: Result limit (default 500, max 1500)
+            
+        Returns:
+            List of kline data arrays
+        """
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        }
+        
+        if start_time:
+            params["startTime"] = start_time
+        if end_time:
+            params["endTime"] = end_time
+            
+        # Klines endpoint is public, use _request (unsigned)
+        return await self._request("GET", "/fapi/v1/klines", params)
+
+    async def get_ticker_price(self, symbol: str) -> Decimal:
+        """Get current price"""
+        params = {"symbol": symbol}
+        response = await self._request("GET", "/fapi/v1/ticker/price", params)
+        return Decimal(response["price"])
     
     # Private methods
     

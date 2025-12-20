@@ -230,9 +230,30 @@ class BacktestRun:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     
-    # Results
+    # Results Summary
+    final_equity: Optional[Decimal] = None
+    total_trades: Optional[int] = None
+    win_rate: Optional[Decimal] = None
+    total_return: Optional[Decimal] = None
+    
+    # Detailed Results (loaded on demand)
     results: Optional[BacktestResults] = None
     error_message: Optional[str] = None
+    
+    @property
+    def initial_capital(self) -> Decimal:
+        """Get initial capital from config."""
+        return self.config.initial_capital
+        
+    @property
+    def start_time(self) -> Optional[datetime]:
+        """Alias for started_at."""
+        return self.started_at
+        
+    @property
+    def end_time(self) -> Optional[datetime]:
+        """Alias for completed_at."""
+        return self.completed_at
     
     # Runtime state (not persisted)
     _current_equity: Decimal = field(default=Decimal("0"), init=False, repr=False)
@@ -249,7 +270,7 @@ class BacktestRun:
             raise ValueError(f"Cannot start backtest in {self.status} status")
         
         self.status = BacktestStatus.RUNNING
-        self.started_at = datetime.now(UTC)
+        self.started_at = datetime.utcnow()
         self._current_equity = self.config.initial_capital
         self._current_positions = {}
         self._open_trades = []
@@ -260,14 +281,14 @@ class BacktestRun:
             raise ValueError(f"Cannot complete backtest in {self.status} status")
         
         self.status = BacktestStatus.COMPLETED
-        self.completed_at = datetime.now(UTC)
+        self.completed_at = datetime.utcnow()
         self.results = results
         self.progress_percent = Decimal("100")
     
     def fail(self, error: str):
         """Mark backtest as failed."""
         self.status = BacktestStatus.FAILED
-        self.completed_at = datetime.now(UTC)
+        self.completed_at = datetime.utcnow()
         self.error_message = error
     
     def cancel(self):
@@ -276,7 +297,7 @@ class BacktestRun:
             raise ValueError(f"Cannot cancel backtest in {self.status} status")
         
         self.status = BacktestStatus.CANCELLED
-        self.completed_at = datetime.now(UTC)
+        self.completed_at = datetime.utcnow()
     
     def update_progress(self, percent: Decimal):
         """Update backtest progress."""

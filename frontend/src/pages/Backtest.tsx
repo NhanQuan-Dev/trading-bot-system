@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
-import { LineChart, Play, Pause, Square, RefreshCw, Eye, TrendingUp, TrendingDown, Target, Activity, Clock, Plus, AlertCircle, Search, RotateCcw, Trash2, Download, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { Play, Pause, Square, Eye, TrendingUp, TrendingDown, Target, Activity, Clock, Plus, AlertCircle, Search, Trash2, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Table,
@@ -29,120 +29,47 @@ import {
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 
-type BacktestStatus = 'running' | 'paused' | 'completed' | 'error';
-type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'sharpeRatio' | 'status' | 'createdAt';
+type BacktestStatus = 'running' | 'paused' | 'completed' | 'error' | 'pending';
+type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'status' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface BacktestItem {
   id: string;
-  strategy: string;
+  strategy: string; // Currently mapped from strategy_id manually or just using ID
   symbol: string;
   timeframe: string;
   startDate: string;
   endDate: string;
   initialCapital: number;
-  netProfit: number;
-  netProfitPercent: number;
-  winRate: number;
-  maxDrawdown: number;
-  sharpeRatio: number;
-  totalTrades: number;
-  profitFactor: number;
+  netProfit: number | null;
+  netProfitPercent: number | null;
+  winRate: number | null;
+  maxDrawdown: number | null; // Not available in list view typically
+  sharpeRatio: number | null; // Not available in list view typically
+  totalTrades: number | null;
+  profitFactor: number | null; // Not available in list view typically
   status: BacktestStatus;
   progress: number;
   createdAt: string;
 }
 
-const statusConfig = {
+const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
   running: { label: 'Running', color: 'border-primary/50 text-primary', icon: Play },
+  pending: { label: 'Pending', color: 'border-yellow-500/50 text-yellow-500', icon: Clock },
   paused: { label: 'Paused', color: 'border-accent/50 text-accent', icon: Pause },
   completed: { label: 'Completed', color: 'border-muted/50 text-muted-foreground', icon: Square },
-  error: { label: 'Error', color: 'border-destructive/50 text-destructive', icon: AlertCircle }
+  error: { label: 'Error', color: 'border-destructive/50 text-destructive', icon: AlertCircle },
+  failed: { label: 'Failed', color: 'border-destructive/50 text-destructive', icon: AlertCircle },
+  cancelled: { label: 'Cancelled', color: 'border-muted/50 text-muted-foreground', icon: Square }
 };
-
-// Mock backtest history data
-const initialBacktestHistory: BacktestItem[] = [
-  { 
-    id: 'bt-001', 
-    strategy: 'Grid Trading', 
-    symbol: 'BTC/USDT', 
-    timeframe: '1h',
-    startDate: '2024-01-01', 
-    endDate: '2024-02-01', 
-    initialCapital: 10000,
-    netProfit: 2845, 
-    netProfitPercent: 28.45,
-    winRate: 67.5, 
-    maxDrawdown: -8.2,
-    sharpeRatio: 1.92,
-    totalTrades: 234,
-    profitFactor: 2.1,
-    status: 'completed',
-    progress: 100,
-    createdAt: '2024-02-01 14:30:00'
-  },
-  { 
-    id: 'bt-002', 
-    strategy: 'DCA', 
-    symbol: 'ETH/USDT', 
-    timeframe: '4h',
-    startDate: '2024-01-15', 
-    endDate: '2024-02-15', 
-    initialCapital: 5000,
-    netProfit: -320, 
-    netProfitPercent: -6.4,
-    winRate: 42.3, 
-    maxDrawdown: -15.5,
-    sharpeRatio: 0.85,
-    totalTrades: 156,
-    profitFactor: 0.87,
-    status: 'running',
-    progress: 65,
-    createdAt: '2024-02-15 10:15:00'
-  },
-  { 
-    id: 'bt-003', 
-    strategy: 'Trend Following', 
-    symbol: 'SOL/USDT', 
-    timeframe: '1d',
-    startDate: '2024-02-01', 
-    endDate: '2024-03-01', 
-    initialCapital: 15000,
-    netProfit: 4250, 
-    netProfitPercent: 28.33,
-    winRate: 58.2, 
-    maxDrawdown: -12.1,
-    sharpeRatio: 1.65,
-    totalTrades: 89,
-    profitFactor: 1.85,
-    status: 'paused',
-    progress: 45,
-    createdAt: '2024-03-01 09:00:00'
-  },
-  { 
-    id: 'bt-004', 
-    strategy: 'Mean Reversion', 
-    symbol: 'BTC/USDT', 
-    timeframe: '15m',
-    startDate: '2024-02-10', 
-    endDate: '2024-02-20', 
-    initialCapital: 8000,
-    netProfit: 1120, 
-    netProfitPercent: 14.0,
-    winRate: 72.1, 
-    maxDrawdown: -5.8,
-    sharpeRatio: 2.15,
-    totalTrades: 412,
-    profitFactor: 2.45,
-    status: 'error',
-    progress: 30,
-    createdAt: '2024-02-20 16:45:00'
-  },
-];
 
 export default function Backtest() {
   const navigate = useNavigate();
-  const [backtests, setBacktests] = useState<BacktestItem[]>(initialBacktestHistory);
+  const { toast } = useToast();
+
+  const [backtests, setBacktests] = useState<BacktestItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [strategies, setStrategies] = useState<{ id: string; name: string; }[]>([]);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStrategy, setFilterStrategy] = useState<string>('all');
@@ -153,7 +80,111 @@ export default function Backtest() {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const itemsPerPage = 10;
-  const { toast } = useToast();
+
+  // Strategy ID mapping - synced with backend seed_strategies.py
+  const STRATEGY_ID_MAP: Record<string, string> = {
+    "Grid Trading": "00000000-0000-0000-0000-000000000001",
+    "Momentum Strategy": "00000000-0000-0000-0000-000000000002",
+    "Mean Reversion": "00000000-0000-0000-0000-000000000003",
+    "Arbitrage": "00000000-0000-0000-0000-000000000004",
+    "Scalping": "00000000-0000-0000-0000-000000000005"
+  };
+
+
+
+
+  const fetchStrategies = async () => {
+    console.log('[DEBUG] fetchStrategies START');
+    try {
+      const res = await fetch('/api/v1/strategies');
+      console.log('[DEBUG] fetchStrategies response received');
+      if (!res.ok) throw new Error('Failed to fetch strategies');
+      const data = await res.json();
+      console.log('[DEBUG] fetchStrategies data:', data);
+      if (Array.isArray(data)) {
+        console.log('[DEBUG] Setting strategies:', data.length, 'items');
+        setStrategies(data);
+        console.log('[DEBUG] setStrategies COMPLETED');
+      } else {
+        console.error('Strategies API returned non-array:', data);
+        setStrategies([]);
+      }
+    } catch (error) {
+      console.error('Failed to load strategies:', error);
+      setStrategies([]);
+    }
+    console.log('[DEBUG] fetchStrategies END');
+  };
+
+  const fetchBacktests = async () => {
+    console.log('[DEBUG] fetchBacktests START');
+    try {
+      setLoading(true);
+      const res = await fetch('/api/v1/backtests?limit=100');
+      console.log('[DEBUG] fetchBacktests response received');
+      if (!res.ok) throw new Error('Failed to fetch backtests');
+
+      const data = await res.json();
+      console.log('[DEBUG] fetchBacktests data received:', data.backtests?.length, 'items');
+      if (!data.backtests || !Array.isArray(data.backtests)) {
+        console.error("Invalid backtests data:", data);
+        setBacktests([]);
+        return;
+      }
+      console.log('[DEBUG] Mapping backtests...');
+      const mapped: BacktestItem[] = data.backtests.map((b: any) => ({
+        id: b.id,
+        strategy: b.strategy_name || strategies.find(s => s.id === b.strategy_id)?.name || 'Unknown Strategy',
+        symbol: b.symbol || 'N/A',
+        timeframe: b.timeframe || 'N/A',
+        startDate: b.start_date,
+        endDate: b.end_date,
+        initialCapital: parseFloat(b.initial_capital),
+        netProfit: b.final_equity ? b.final_equity - b.initial_capital : null,
+        netProfitPercent: b.total_return ? b.total_return * 100 : null,
+        winRate: b.win_rate != null ? parseFloat(b.win_rate) : null,
+        maxDrawdown: null,
+        sharpeRatio: null,
+        totalTrades: b.total_trades,
+        profitFactor: null,
+        status: b.status.toLowerCase(),
+        progress: b.progress_percent,
+        createdAt: b.created_at
+      }));
+      console.log('[DEBUG] setBacktests with', mapped.length, 'items');
+      setBacktests(mapped);
+      console.log('[DEBUG] setBacktests COMPLETED');
+    } catch (error) {
+      console.error('[DEBUG] fetchBacktests ERROR:', error);
+      toast({ title: 'Error fetching backtests', variant: 'destructive' });
+    } finally {
+      setLoading(false);
+      console.log('[DEBUG] fetchBacktests END');
+    }
+  };
+
+  useEffect(() => {
+    console.log('[DEBUG] Initial useEffect START');
+    fetchBacktests();
+    fetchStrategies();
+    console.log('[DEBUG] Initial fetches triggered');
+    // Poll for updates every 5 seconds if there are running backtests
+    const interval = setInterval(() => {
+      console.log('[DEBUG] Polling interval fired');
+      setBacktests(prev => {
+        const hasRunning = prev.some(b => b.status === 'running' || b.status === 'pending');
+        if (hasRunning) {
+          console.log('[DEBUG] Has running backtests, refetching...');
+          fetchBacktests();
+        }
+        return prev;
+      });
+    }, 5000);
+    return () => {
+      console.log('[DEBUG] Cleaning up interval');
+      clearInterval(interval);
+    };
+  }, []);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -171,19 +202,19 @@ export default function Backtest() {
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 ml-1 opacity-50" />;
-    return sortDirection === 'desc' 
-      ? <ArrowDown className="h-3 w-3 ml-1" /> 
+    return sortDirection === 'desc'
+      ? <ArrowDown className="h-3 w-3 ml-1" />
       : <ArrowUp className="h-3 w-3 ml-1" />;
   };
 
   // Get unique strategies and symbols for filters
-  const strategies = useMemo(() => [...new Set(backtests.map(b => b.strategy))], [backtests]);
+  const uniqueStrategies = useMemo(() => [...new Set(backtests.map(b => b.strategy))], [backtests]);
   const symbols = useMemo(() => [...new Set(backtests.map(b => b.symbol))], [backtests]);
 
   // Filtered and sorted backtests
   const filteredBacktests = useMemo(() => {
     let result = backtests.filter(bt => {
-      const matchesSearch = searchQuery === '' || 
+      const matchesSearch = searchQuery === '' ||
         bt.strategy.toLowerCase().includes(searchQuery.toLowerCase()) ||
         bt.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
         bt.id.toLowerCase().includes(searchQuery.toLowerCase());
@@ -205,13 +236,10 @@ export default function Backtest() {
             comparison = a.symbol.localeCompare(b.symbol);
             break;
           case 'netProfit':
-            comparison = a.netProfit - b.netProfit;
+            comparison = (a.netProfit || 0) - (b.netProfit || 0);
             break;
           case 'winRate':
-            comparison = a.winRate - b.winRate;
-            break;
-          case 'sharpeRatio':
-            comparison = a.sharpeRatio - b.sharpeRatio;
+            comparison = (a.winRate || 0) - (b.winRate || 0);
             break;
           case 'status':
             comparison = a.status.localeCompare(b.status);
@@ -235,7 +263,7 @@ export default function Backtest() {
   }, [filteredBacktests, currentPage, itemsPerPage]);
 
   // Reset page when filters change
-  useMemo(() => {
+  useEffect(() => {
     setCurrentPage(1);
   }, [searchQuery, filterStrategy, filterSymbol, filterStatus]);
 
@@ -261,122 +289,105 @@ export default function Backtest() {
     setSelectedIds(newSelected);
   };
 
-  const handleStart = (id: string) => {
-    setBacktests(prev => prev.map(bt => 
-      bt.id === id ? { ...bt, status: 'running' as BacktestStatus } : bt
-    ));
-    toast({ title: 'Backtest started' });
-  };
-
-  const handlePause = (id: string) => {
-    setBacktests(prev => prev.map(bt => 
-      bt.id === id ? { ...bt, status: 'paused' as BacktestStatus } : bt
-    ));
-    toast({ title: 'Backtest paused' });
-  };
-
-  const handleStop = (id: string) => {
-    setBacktests(prev => prev.map(bt => 
-      bt.id === id ? { ...bt, status: 'completed' as BacktestStatus, progress: 100 } : bt
-    ));
-    toast({ title: 'Backtest stopped' });
-  };
-
-  const handleRetry = (id: string) => {
-    setBacktests(prev => prev.map(bt => 
-      bt.id === id ? { ...bt, status: 'running' as BacktestStatus, progress: 0 } : bt
-    ));
-    toast({ title: 'Backtest restarted' });
-  };
-
-  // Bulk actions
-  const handleBulkDelete = () => {
-    if (selectedIds.size === 0) return;
-    setBacktests(prev => prev.filter(bt => !selectedIds.has(bt.id)));
-    toast({ title: `Deleted ${selectedIds.size} backtest(s)` });
-    setSelectedIds(new Set());
-  };
-
-  const handleBulkRestart = () => {
-    if (selectedIds.size === 0) return;
-    setBacktests(prev => prev.map(bt => 
-      selectedIds.has(bt.id) ? { ...bt, status: 'running' as BacktestStatus, progress: 0 } : bt
-    ));
-    toast({ title: `Restarted ${selectedIds.size} backtest(s)` });
-    setSelectedIds(new Set());
-  };
-
-  const handleExportCSV = () => {
-    const dataToExport = selectedIds.size > 0 
-      ? backtests.filter(bt => selectedIds.has(bt.id))
-      : filteredBacktests;
-    
-    const headers = ['ID', 'Strategy', 'Symbol', 'Timeframe', 'Start Date', 'End Date', 'Initial Capital', 'Net Profit', 'Net Profit %', 'Win Rate', 'Max Drawdown', 'Sharpe Ratio', 'Total Trades', 'Profit Factor', 'Status', 'Progress', 'Created At'];
-    const csvRows = [
-      headers.join(','),
-      ...dataToExport.map(bt => [
-        bt.id,
-        bt.strategy,
-        bt.symbol,
-        bt.timeframe,
-        bt.startDate,
-        bt.endDate,
-        bt.initialCapital,
-        bt.netProfit,
-        bt.netProfitPercent,
-        bt.winRate,
-        bt.maxDrawdown,
-        bt.sharpeRatio,
-        bt.totalTrades,
-        bt.profitFactor,
-        bt.status,
-        bt.progress,
-        bt.createdAt
-      ].join(','))
-    ];
-    
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `backtest-results-${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast({ title: `Exported ${dataToExport.length} backtest(s) to CSV` });
-  };
-
-  const handleCreateBacktest = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleCreateBacktest = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const newBacktest: BacktestItem = {
-      id: `bt-${Date.now()}`,
-      strategy: formData.get('strategy') as string,
-      symbol: formData.get('symbol') as string,
-      timeframe: formData.get('timeframe') as string,
-      startDate: formData.get('startDate') as string,
-      endDate: formData.get('endDate') as string,
-      initialCapital: Number(formData.get('initialCapital')),
-      netProfit: 0,
-      netProfitPercent: 0,
-      winRate: 0,
-      maxDrawdown: 0,
-      sharpeRatio: 0,
-      totalTrades: 0,
-      profitFactor: 0,
-      status: 'running',
-      progress: 0,
-      createdAt: new Date().toISOString()
+
+    // Get strategy ID directly from form - strategies dropdown already uses UUID
+    const strategyId = formData.get('strategy') as string;
+    console.log("DEBUG: Strategy UUID =", strategyId);
+
+    const payload = {
+      strategy_id: strategyId,
+      config: {
+        symbol: formData.get('symbol'),
+        timeframe: formData.get('timeframe'),
+        // Convert date to datetime format (backend expects ISO datetime)
+        start_date: `${formData.get('startDate')}T00:00:00`,
+        end_date: `${formData.get('endDate')}T00:00:00`,
+        initial_capital: Number(formData.get('initialCapital')),
+        position_sizing: 'percent_equity',
+        position_size_percent: 100,
+        mode: 'event_driven'
+      }
     };
-    setBacktests(prev => [newBacktest, ...prev]);
-    setIsCreateOpen(false);
-    toast({ title: 'Backtest created and started!' });
+
+    console.log("DEBUG: Full payload =", JSON.stringify(payload, null, 2));
+
+    try {
+      const res = await fetch('/api/v1/backtests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        console.error("DEBUG: Error response =", errorData);
+        throw new Error('Failed to create backtest');
+      }
+
+      toast({ title: 'Backtest started successfully' });
+      setIsCreateOpen(false);
+      fetchBacktests();
+    } catch (error) {
+      console.error("DEBUG: Catch error =", error);
+      toast({ title: 'Failed to start backtest', variant: 'destructive' });
+    }
   };
 
-  // Summary metrics
+  const handleStop = async (id: string) => {
+    try {
+      const res = await fetch(`/api/v1/backtests/${id}/cancel`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to stop backtest');
+      toast({ title: 'Backtest stopped' });
+      fetchBacktests();
+    } catch (error) {
+      toast({ title: 'Failed to stop backtest', variant: 'destructive' });
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      const res = await fetch(`/api/v1/backtests/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete backtest');
+      toast({ title: 'Backtest deleted' });
+      // If deleted item was selected, remove from selection
+      if (selectedIds.has(id)) {
+        const next = new Set(selectedIds);
+        next.delete(id);
+        setSelectedIds(next);
+      }
+      fetchBacktests();
+    } catch (error) {
+      toast({ title: 'Failed to delete backtest', variant: 'destructive' });
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    try {
+      await Promise.all(Array.from(selectedIds).map(id =>
+        fetch(`/api/v1/backtests/${id}`, { method: 'DELETE' })
+      ));
+      toast({ title: `Deleted ${selectedIds.size} backtest(s)` });
+      setSelectedIds(new Set());
+      fetchBacktests();
+    } catch (error) {
+      toast({ title: 'Failed to delete some backtests', variant: 'destructive' });
+    }
+  };
+
   const totalBacktests = backtests.length;
-  const profitableBacktests = backtests.filter(b => b.netProfit > 0).length;
-  const avgWinRate = backtests.reduce((acc, b) => acc + b.winRate, 0) / totalBacktests;
-  const avgSharpe = backtests.reduce((acc, b) => acc + b.sharpeRatio, 0) / totalBacktests;
+  const profitableBacktests = backtests.filter(b => (b.netProfit || 0) > 0).length;
+  // Filter for valid numeric win rates (not null, not 0, and is a number)
+  const validWinRates = backtests.filter(b => typeof b.winRate === 'number' && b.winRate > 0);
+  const avgWinRate = validWinRates.length > 0
+    ? validWinRates.reduce((acc, b) => acc + (b.winRate as number), 0) / validWinRates.length
+    : 0;
+
+  // Note: Sharpe is not available in list view, so we validly can't show Avg Sharpe here without N+1 queries.
+  // We will remove Avg Sharpe card or put placeholder.
 
   return (
     <DashboardLayout>
@@ -404,15 +415,14 @@ export default function Backtest() {
               <form onSubmit={handleCreateBacktest} className="space-y-4 pt-4">
                 <div className="space-y-2">
                   <Label>Strategy</Label>
-                  <Select name="strategy" defaultValue="Grid Trading">
+                  <Select name="strategy" defaultValue={strategies[0]?.id || ""} >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="Grid Trading">Grid Trading</SelectItem>
-                      <SelectItem value="DCA">DCA</SelectItem>
-                      <SelectItem value="Trend Following">Trend Following</SelectItem>
-                      <SelectItem value="Mean Reversion">Mean Reversion</SelectItem>
+                      {strategies.map(s => (
+                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -420,16 +430,7 @@ export default function Backtest() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Trading Pair</Label>
-                    <Select name="symbol" defaultValue="BTC/USDT">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="BTC/USDT">BTC/USDT</SelectItem>
-                        <SelectItem value="ETH/USDT">ETH/USDT</SelectItem>
-                        <SelectItem value="SOL/USDT">SOL/USDT</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Input name="symbol" defaultValue="BTC/USDT" placeholder="e.g. BTC/USDT" required />
                   </div>
                   <div className="space-y-2">
                     <Label>Timeframe</Label>
@@ -478,7 +479,7 @@ export default function Backtest() {
         </div>
 
         {/* Summary Cards */}
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-3">
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <div className="flex items-center gap-2">
@@ -504,15 +505,6 @@ export default function Backtest() {
                 <p className="text-sm text-muted-foreground">Avg Win Rate</p>
               </div>
               <p className="mt-1 text-2xl font-bold text-foreground">{avgWinRate.toFixed(1)}%</p>
-            </CardContent>
-          </Card>
-          <Card className="border-border bg-card">
-            <CardContent className="pt-4">
-              <div className="flex items-center gap-2">
-                <LineChart className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">Avg Sharpe</p>
-              </div>
-              <p className="mt-1 text-2xl font-bold text-foreground">{avgSharpe.toFixed(2)}</p>
             </CardContent>
           </Card>
         </div>
@@ -544,7 +536,7 @@ export default function Backtest() {
                 <SelectContent>
                   <SelectItem value="all">All Strategies</SelectItem>
                   {strategies.map(s => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
+                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -576,25 +568,9 @@ export default function Backtest() {
             {selectedIds.size > 0 && (
               <div className="flex items-center gap-2 pt-3">
                 <span className="text-sm text-muted-foreground">{selectedIds.size} selected</span>
-                <Button variant="outline" size="sm" onClick={handleBulkRestart} className="gap-1">
-                  <RotateCcw className="h-3 w-3" />
-                  Restart
-                </Button>
                 <Button variant="outline" size="sm" onClick={handleBulkDelete} className="gap-1 text-destructive hover:text-destructive">
                   <Trash2 className="h-3 w-3" />
                   Delete
-                </Button>
-                <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-1">
-                  <Download className="h-3 w-3" />
-                  Export CSV
-                </Button>
-              </div>
-            )}
-            {selectedIds.size === 0 && (
-              <div className="flex items-center gap-2 pt-3">
-                <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-1">
-                  <Download className="h-3 w-3" />
-                  Export All to CSV
                 </Button>
               </div>
             )}
@@ -605,7 +581,7 @@ export default function Backtest() {
                 <TableHeader>
                   <TableRow className="border-border hover:bg-transparent">
                     <TableHead className="w-[40px]">
-                      <Checkbox 
+                      <Checkbox
                         checked={isAllSelected}
                         onCheckedChange={toggleSelectAll}
                         aria-label="Select all"
@@ -613,16 +589,16 @@ export default function Backtest() {
                       />
                     </TableHead>
                     <TableHead>
-                      <button 
-                        onClick={() => handleSort('strategy')} 
+                      <button
+                        onClick={() => handleSort('strategy')}
                         className="flex items-center hover:text-foreground transition-colors"
                       >
                         Strategy <SortIcon field="strategy" />
                       </button>
                     </TableHead>
                     <TableHead>
-                      <button 
-                        onClick={() => handleSort('symbol')} 
+                      <button
+                        onClick={() => handleSort('symbol')}
                         className="flex items-center hover:text-foreground transition-colors"
                       >
                         Symbol <SortIcon field="symbol" />
@@ -630,48 +606,47 @@ export default function Backtest() {
                     </TableHead>
                     <TableHead>Period</TableHead>
                     <TableHead>
-                      <button 
-                        onClick={() => handleSort('status')} 
+                      <button
+                        onClick={() => handleSort('status')}
                         className="flex items-center hover:text-foreground transition-colors"
                       >
                         Status <SortIcon field="status" />
                       </button>
                     </TableHead>
                     <TableHead className="text-right">
-                      <button 
-                        onClick={() => handleSort('netProfit')} 
+                      <button
+                        onClick={() => handleSort('netProfit')}
                         className="flex items-center justify-end w-full hover:text-foreground transition-colors"
                       >
                         Net P&L <SortIcon field="netProfit" />
                       </button>
                     </TableHead>
                     <TableHead className="text-right">
-                      <button 
-                        onClick={() => handleSort('winRate')} 
+                      <button
+                        onClick={() => handleSort('winRate')}
                         className="flex items-center justify-end w-full hover:text-foreground transition-colors"
                       >
                         Win Rate <SortIcon field="winRate" />
-                      </button>
-                    </TableHead>
-                    <TableHead className="text-right">
-                      <button 
-                        onClick={() => handleSort('sharpeRatio')} 
-                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
-                      >
-                        Sharpe <SortIcon field="sharpeRatio" />
                       </button>
                     </TableHead>
                     <TableHead className="text-center">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {paginatedBacktests.map((backtest) => {
-                    const isProfit = backtest.netProfit >= 0;
-                    const config = statusConfig[backtest.status];
+                  {paginatedBacktests.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={8} className="text-center h-24 text-muted-foreground">
+                        No backtests found. Create one to get started.
+                      </TableCell>
+                    </TableRow>
+                  ) : paginatedBacktests.map((backtest) => {
+                    const isProfit = (backtest.netProfit || 0) >= 0;
+                    const config = statusConfig[backtest.status] || statusConfig['pending'];
+                    const Icon = config.icon;
                     return (
                       <TableRow key={backtest.id} className="border-border">
                         <TableCell>
-                          <Checkbox 
+                          <Checkbox
                             checked={selectedIds.has(backtest.id)}
                             onCheckedChange={() => toggleSelect(backtest.id)}
                             aria-label={`Select ${backtest.id}`}
@@ -693,6 +668,7 @@ export default function Backtest() {
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <Badge variant="outline" className={config.color}>
+                              <Icon className="mr-1 h-3 w-3" />
                               {config.label}
                             </Badge>
                             {backtest.status === 'running' && (
@@ -705,51 +681,35 @@ export default function Backtest() {
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-1">
-                            {isProfit ? (
-                              <TrendingUp className="h-3 w-3 text-primary" />
+                            {backtest.netProfit !== null ? (
+                              <>
+                                {isProfit ? (
+                                  <TrendingUp className="h-3 w-3 text-primary" />
+                                ) : (
+                                  <TrendingDown className="h-3 w-3 text-destructive" />
+                                )}
+                                <span className={cn("font-mono font-medium", isProfit ? "text-primary" : "text-destructive")}>
+                                  {isProfit ? '+' : ''}${backtest.netProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                </span>
+                              </>
                             ) : (
-                              <TrendingDown className="h-3 w-3 text-destructive" />
+                              <span className="text-muted-foreground">-</span>
                             )}
-                            <span className={cn("font-mono font-medium", isProfit ? "text-primary" : "text-destructive")}>
-                              {isProfit ? '+' : ''}${backtest.netProfit.toLocaleString()}
-                            </span>
                           </div>
-                          <p className={cn("text-xs", isProfit ? "text-primary/70" : "text-destructive/70")}>
-                            {isProfit ? '+' : ''}{backtest.netProfitPercent.toFixed(2)}%
-                          </p>
+                          {backtest.netProfitPercent != null && (
+                            <p className={cn("text-xs", isProfit ? "text-primary/70" : "text-destructive/70")}>
+                              {isProfit ? '+' : ''}{Number(backtest.netProfitPercent).toFixed(2)}%
+                            </p>
+                          )}
                         </TableCell>
                         <TableCell className="text-right font-mono">
-                          {backtest.winRate.toFixed(1)}%
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.sharpeRatio.toFixed(2)}
+                          {backtest.winRate != null ? `${Number(backtest.winRate).toFixed(1)}%` : '-'}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center justify-center gap-1">
-                            {backtest.status === 'running' ? (
-                              <Button 
-                                variant="ghost" 
-                                size="icon"
-                                onClick={() => handlePause(backtest.id)}
-                                className="h-8 w-8"
-                                title="Pause"
-                              >
-                                <Pause className="h-4 w-4" />
-                              </Button>
-                            ) : backtest.status === 'paused' ? (
-                              <Button 
-                                variant="ghost" 
-                                size="icon"
-                                onClick={() => handleStart(backtest.id)}
-                                className="h-8 w-8"
-                                title="Resume"
-                              >
-                                <Play className="h-4 w-4" />
-                              </Button>
-                            ) : null}
                             {(backtest.status === 'running' || backtest.status === 'paused') && (
-                              <Button 
-                                variant="ghost" 
+                              <Button
+                                variant="ghost"
                                 size="icon"
                                 onClick={() => handleStop(backtest.id)}
                                 className="h-8 w-8"
@@ -759,18 +719,18 @@ export default function Backtest() {
                               </Button>
                             )}
                             {backtest.status === 'error' && (
-                              <Button 
-                                variant="ghost" 
+                              <Button
+                                variant="ghost"
                                 size="icon"
-                                onClick={() => handleRetry(backtest.id)}
-                                className="h-8 w-8 text-accent"
-                                title="Retry"
+                                onClick={() => handleDelete(backtest.id)} // can't really retry easily without reforming config
+                                className="h-8 w-8 text-destructive"
+                                title="Delete"
                               >
-                                <RotateCcw className="h-4 w-4" />
+                                <Trash2 className="h-4 w-4" />
                               </Button>
                             )}
-                            <Button 
-                              variant="ghost" 
+                            <Button
+                              variant="ghost"
                               size="icon"
                               onClick={() => navigate(`/backtest/${backtest.id}`)}
                               className="h-8 w-8"
@@ -800,28 +760,13 @@ export default function Backtest() {
                     disabled={currentPage === 1}
                   >
                     <ChevronLeft className="h-4 w-4" />
-                    Previous
                   </Button>
-                  <div className="flex items-center gap-1">
-                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(page => (
-                      <Button
-                        key={page}
-                        variant={currentPage === page ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setCurrentPage(page)}
-                        className="h-8 w-8 p-0"
-                      >
-                        {page}
-                      </Button>
-                    ))}
-                  </div>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                     disabled={currentPage === totalPages}
                   >
-                    Next
                     <ChevronRight className="h-4 w-4" />
                   </Button>
                 </div>

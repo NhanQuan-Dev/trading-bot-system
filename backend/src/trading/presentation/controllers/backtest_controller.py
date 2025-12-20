@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import csv
 import io
+import os
 from datetime import datetime
 
 from ...application.backtesting import (
@@ -28,6 +29,8 @@ from ...application.backtesting.schemas import (
 from ...domain.backtesting import BacktestConfig
 from ...infrastructure.backtesting import BacktestRepository
 from ...infrastructure.persistence.database import get_db
+from ...infrastructure.exchange.binance_adapter import BinanceAdapter
+from ...infrastructure.services.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +67,8 @@ async def run_backtest(
     
     try:
         # Convert request to domain config
-        # BacktestConfig doesn't accept symbol/timeframe/dates, those are part of BacktestRun
         config = BacktestConfig(
+            symbol=request.config.symbol,  # Add symbol to config
             mode=request.config.mode.value if hasattr(request.config.mode, 'value') else request.config.mode,
             initial_capital=request.config.initial_capital,
             position_sizing=request.config.position_sizing.value if hasattr(request.config.position_sizing, 'value') else request.config.position_sizing,
@@ -74,54 +77,75 @@ async def run_backtest(
             slippage_model=request.config.slippage_model.value if hasattr(request.config.slippage_model, 'value') else request.config.slippage_model,
             slippage_percent=request.config.slippage_percent / 100,  # Convert percent to decimal
             commission_model=request.config.commission_model.value if hasattr(request.config.commission_model, 'value') else request.config.commission_model,
-            commission_percent=request.config.commission_rate / 100,  # Convert percent to decimal
+            commission_percent=request.config.commission_rate / 100,  # API uses commission_rate, convert to percent
         )
         
-        # TODO: Load strategy function from strategy_id
-        # For now, use a simple moving average crossover strategy
-        def strategy_func(candle, idx, position):
-            """Simple MA crossover strategy."""
-            if idx < 20:
-                return None
-            
-            # Simple signal generation (placeholder)
-            if candle.get("close", 0) > candle.get("ma_20", 0):
-                if not position:
-                    return {"type": "buy"}
-            else:
-                if position:
-                    return {"type": "close"}
-            
-            return None
+        # Load strategy function dynamically based on strategy_id
+        from ...strategies.backtest_adapter import get_strategy_function
+        
+        # Get strategy parameters from config if available
+        strategy_config = getattr(request.config, 'strategy_params', None) or {}
+        
+        strategy_func = get_strategy_function(
+            strategy_id=str(request.strategy_id),
+            config=strategy_config
+        )
+        
+        logger.info(f"Loaded strategy function for ID: {request.strategy_id}")
         
         # Create use case
-        # TODO: Inject proper market data service
-        market_data_service = None  # Placeholder
+        # Initialize adapter with environment variables or defaults
+        # For public data (backtesting), keys can be dummy if not set
+        api_key = os.getenv("BINANCE_API_KEY", "")
+        api_secret = os.getenv("BINANCE_API_SECRET", "")
+        
+        adapter = BinanceAdapter(api_key=api_key, api_secret=api_secret)
+        market_data_service = MarketDataService(adapter)
+        
         use_case = RunBacktestUseCase(repository, market_data_service)
         
-        # Run in background
-        async def run_backtest_task():
-            try:
-                await use_case.execute(
-                    user_id=user_id,
-                    strategy_id=request.strategy_id,
-                    config=config,
-                    strategy_func=strategy_func,
-                )
-            except Exception as e:
-                logger.error(f"Background backtest failed: {str(e)}")
-        
-        background_tasks.add_task(run_backtest_task)
-        
-        # Return initial run info
+        # Create backtest run entity FIRST (before background task)
         from ...domain.backtesting import BacktestRun
         backtest_run = BacktestRun(
             user_id=user_id,
             strategy_id=request.strategy_id,
+            symbol=request.config.symbol,
+            timeframe=request.config.timeframe,
+            start_date=request.config.start_date,
+            end_date=request.config.end_date,
             config=config,
         )
         await repository.save(backtest_run)
+        backtest_id = backtest_run.id
         
+        # Run in background - use existing backtest_run
+        async def run_backtest_task():
+            logger.info(f"Task started for backtest {backtest_id}")
+            try:
+                result = await use_case.execute(
+                    user_id=user_id,
+                    strategy_id=request.strategy_id,
+                    config=config,
+                    symbol=request.config.symbol,
+                    timeframe=request.config.timeframe,
+                    start_date=request.config.start_date,
+                    end_date=request.config.end_date,
+                    strategy_func=strategy_func,
+                    backtest_run_id=backtest_id,  # Pass ID to prevent duplicate creation
+                )
+                logger.info(f"Task completed for backtest {backtest_id}")
+            except Exception as e:
+                logger.error(f"Backtest task failed: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
+        
+        
+        
+        
+        background_tasks.add_task(run_backtest_task)
+        
+        # Return the backtest_run that was already created
         return BacktestRunResponse.model_validate(backtest_run)
         
     except Exception as e:
@@ -188,9 +212,8 @@ async def get_backtest_results(
 ):
     """Get detailed backtest results with performance metrics."""
     
-    # TODO: Implement results service
-    results_service = None  # Placeholder
-    use_case = GetBacktestResultsUseCase(repository, results_service)
+    # results_service is not needed as repository handles retrieval
+    use_case = GetBacktestResultsUseCase(repository, None)
     
     result = await use_case.execute(backtest_id)
     
@@ -356,18 +379,17 @@ async def get_backtest_trades(
         return {
             "trades": [
                 {
-                    "id": trade.id,
+                    "id": str(trade.id),
                     "symbol": trade.symbol,
-                    "side": trade.side,
+                    "side": trade.direction,
                     "entry_price": float(trade.entry_price),
                     "exit_price": float(trade.exit_price) if trade.exit_price else None,
                     "quantity": float(trade.quantity),
-                    "pnl": float(trade.pnl) if trade.pnl else None,
-                    "pnl_pct": float(trade.pnl_pct) if trade.pnl_pct else None,
+                    "pnl": float(trade.net_pnl) if trade.net_pnl is not None else None,
+                    "pnl_pct": float(trade.pnl_percent) if trade.pnl_percent is not None else None,
                     "duration": trade.duration_seconds if hasattr(trade, 'duration_seconds') else None,
-                    "created_at": trade.created_at.isoformat(),
-                    "entry_time": trade.entry_time.isoformat() if hasattr(trade, 'entry_time') else None,
-                    "exit_time": trade.exit_time.isoformat() if hasattr(trade, 'exit_time') and trade.exit_time else None,
+                    "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
+                    "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
                 }
                 for trade in trades
             ],

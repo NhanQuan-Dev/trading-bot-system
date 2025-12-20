@@ -22,8 +22,8 @@ class BacktestConfigRequest(BaseModel):
     
     symbol: str = Field(..., description="Trading symbol")
     timeframe: str = Field(..., description="Candlestick timeframe")
-    start_date: date = Field(..., description="Backtest start date")
-    end_date: date = Field(..., description="Backtest end date")
+    start_date: datetime = Field(..., description="Backtest start date")
+    end_date: datetime = Field(..., description="Backtest end date")
     initial_capital: Decimal = Field(..., description="Initial capital", gt=0)
     
     # Position sizing
@@ -64,6 +64,12 @@ class BacktestConfigRequest(BaseModel):
         description="Backtest mode"
     )
     
+    # Strategy-specific parameters
+    strategy_params: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Strategy-specific configuration parameters"
+    )
+    
     model_config = ConfigDict(use_enum_values=False)
 
 
@@ -85,10 +91,11 @@ class BacktestRunResponse(BaseModel):
     id: UUID
     user_id: UUID
     strategy_id: UUID
+    strategy_name: Optional[str] = None
     symbol: str
     timeframe: str
-    start_date: date
-    end_date: date
+    start_date: datetime
+    end_date: datetime
     initial_capital: Decimal
     status: BacktestStatus
     progress_percent: int

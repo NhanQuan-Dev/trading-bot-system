@@ -9,9 +9,9 @@ from .orders import router as orders_router
 # Import new comprehensive routes
 from ....presentation.controllers import (
     bots_router,
-    strategies_router,
     market_data_router,
 )
+from .strategies import router as strategies_router
 from ....presentation.controllers.risk.risk_controller import router as risk_router
 from ....presentation.controllers.cache_controller import router as cache_router
 from ....presentation.controllers.jobs_controller import router as jobs_router
@@ -29,7 +29,7 @@ router.include_router(orders_router)
 
 # Include new comprehensive routers
 router.include_router(bots_router)
-router.include_router(strategies_router)
+router.include_router(strategies_router, prefix="/strategies", tags=["strategies"])
 router.include_router(market_data_router)
 router.include_router(risk_router)
 router.include_router(cache_router)

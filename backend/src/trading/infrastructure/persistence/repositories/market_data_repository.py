@@ -266,6 +266,44 @@ class CandleRepository(ICandleRepository):
         await self._session.flush()
         return count
 
+    async def save_batch(self, candles: List[Candle]) -> None:
+        """Save multiple candles."""
+        try:
+            for candle in candles:
+                await self.save(candle)
+            await self._session.flush()
+        except Exception as e:
+            await self._session.rollback()
+            raise e
+
+    async def get_ohlc_data(
+        self,
+        symbol: str,
+        interval: CandleInterval,
+        start_time: datetime,
+        end_time: datetime
+    ) -> List[Dict[str, Any]]:
+        """Get OHLC data formatted for charting."""
+        candles = await self.find_by_symbol_and_interval(
+            symbol=symbol,
+            interval=interval,
+            start_time=start_time,
+            end_time=end_time,
+            limit=1000
+        )
+        
+        return [
+            {
+                "timestamp": candle.open_time.isoformat() if candle.open_time else None,
+                "open": float(candle.open_price),
+                "high": float(candle.high_price),
+                "low": float(candle.low_price),
+                "close": float(candle.close_price),
+                "volume": float(candle.volume) if candle.volume else 0
+            }
+            for candle in sorted(candles, key=lambda c: c.open_time)
+        ]
+
     def _domain_to_model(self, candle: Candle) -> MarketPriceModel:
         """Convert domain entity to database model."""
         return MarketPriceModel(

@@ -109,6 +109,9 @@ class TimeframeReturns:
 class BacktestConfig:
     """Configuration for backtest execution."""
     
+    # Symbol
+    symbol: str = ""
+    
     # Execution mode
     mode: str = "event_driven"
     
