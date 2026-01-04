@@ -23,21 +23,19 @@ class WebSocketManager:
         self.price_cache = price_cache
         self.session_cache = user_session_cache
     
-    async def connect(self, websocket: WebSocket, token: str) -> Optional[str]:
+    async def connect(self, websocket: WebSocket, user_id: str) -> Optional[str]:
         """
-        Accept WebSocket connection and authenticate user.
+        Accept WebSocket connection.
         
+        Args:
+            websocket: WebSocket connection
+            user_id: Authenticated user ID
+            
         Returns:
-            connection_id if successful, None if authentication failed
+            connection_id if successful, None if failed
         """
         try:
-            # Authenticate user from token
-            user_id = verify_access_token(token)
-            
-            # Accept connection
-            await websocket.accept()
-            
-            # Generate connection ID
+            # generating connection ID
             connection_id = str(uuid.uuid4())
             
             # Register connection
@@ -56,8 +54,8 @@ class WebSocketManager:
             return connection_id
             
         except Exception as e:
-            logger.error(f"WebSocket authentication failed: {e}")
-            await websocket.close(code=1008, reason="Authentication failed")
+            logger.error(f"WebSocket connection failed: {e}")
+            await websocket.close(code=1008, reason="Connection failed")
             return None
     
     async def disconnect(self, connection_id: str):
@@ -79,6 +77,7 @@ class WebSocketManager:
         """Handle incoming WebSocket message."""
         try:
             message_type = message.get("type")
+            logger.info(f"WS Message Received [{connection_id}]: {message_type}")
             
             if message_type == "subscribe":
                 await self._handle_subscribe(connection_id, websocket, message)
@@ -92,46 +91,191 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}")
             await self._send_error(websocket, "Invalid message format")
+
+    async def subscribe_user(self, user_id: str, channels: List[str]):
+        """Subscribe user to a list of channels."""
+        for channel in channels:
+            try:
+                stream_type = None
+                symbol = None
+                
+                if ":" in channel:
+                    type_str, symbol = channel.split(":", 1)
+                    if type_str == "positions":
+                        stream_type = StreamType.POSITIONS
+                    elif type_str == "orders":
+                        stream_type = StreamType.ORDERS
+                    elif type_str == "trades":
+                        stream_type = StreamType.TRADES
+                    elif type_str == "orderbook":
+                        stream_type = StreamType.ORDERBOOK
+                
+                    if stream_type:
+                        subscription = Subscription(
+                            user_id=user_id,
+                            stream_type=stream_type,
+                            symbol=symbol,
+                            filters={},
+                            status=SubscriptionStatus.CONNECTED,
+                            created_at=datetime.utcnow()
+                        )
+                        self.connection_manager.add_subscription(user_id, subscription)
+                        logger.info(f"User {user_id} subscribed to {channel} (Parsed: {stream_type}:{symbol})")
+            except Exception as e:
+                logger.error(f"Error subscribing user {user_id} to {channel}: {e}")
+
+    async def unsubscribe_user(self, user_id: str, channels: List[str]):
+        """Unsubscribe user from a list of channels."""
+        for channel in channels:
+            try:
+                if ":" in channel:
+                    type_str, symbol = channel.split(":", 1)
+                    stream_type = None
+                    if type_str == "positions":
+                        stream_type = StreamType.POSITIONS
+                    elif type_str == "orders":
+                        stream_type = StreamType.ORDERS
+                    elif type_str == "trades":
+                        stream_type = StreamType.TRADES
+                    elif type_str == "orderbook":
+                        stream_type = StreamType.ORDERBOOK
+                    
+                    if stream_type:
+                        self.connection_manager.remove_subscription(user_id, stream_type, symbol)
+                        logger.info(f"User {user_id} unsubscribed from {channel}")
+            except Exception as e:
+                logger.error(f"Error unsubscribing user {user_id} from {channel}: {e}")
+
+    async def subscribe_to_price_updates(self, user_id: str, symbol: str):
+        """Subscribe user to price updates for a symbol."""
+        try:
+            subscription = Subscription(
+                user_id=user_id,
+                stream_type=StreamType.PRICE,
+                symbol=symbol,
+                filters={},
+                status=SubscriptionStatus.CONNECTED,
+                created_at=datetime.utcnow()
+            )
+            self.connection_manager.add_subscription(user_id, subscription)
+        except Exception as e:
+            logger.error(f"Error subscribing user {user_id} to price updates for {symbol}: {e}")
+
+    async def broadcast_to_channel(self, channel: str, message: Dict[str, Any]):
+        """Broadcast message to a channel."""
+        try:
+            stream_type = None
+            symbol = None
+            
+            if ":" in channel:
+                type_str, symbol = channel.split(":", 1)
+                if type_str == "positions":
+                    stream_type = StreamType.POSITIONS
+                elif type_str == "orders":
+                    stream_type = StreamType.ORDERS
+            
+            if stream_type:
+                logger.debug(f"Manager BroadCasting to {stream_type} : {symbol}")
+                stream_message = StreamMessage(
+                    stream_type=stream_type,
+                    symbol=symbol,
+                    data=message.get("data", message), # Unwrap 'data' if present, else use whole message
+                    timestamp=datetime.utcnow()
+                )
+                
+                # Manual broadcast since ConnectionManager is sync and has stubbed method
+                subscribers = self.connection_manager.get_subscribers(stream_type, symbol)
+                
+                for user_id in subscribers:
+                    connections = self.connection_manager.get_user_connections(user_id)
+                    for websocket in connections:
+                        try:
+                            await websocket.send_text(stream_message.to_json())
+                        except Exception as e:
+                            logger.error(f"Error sending to user {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"Error broadcasting to channel {channel}: {e}")
     
     async def _handle_subscribe(self, connection_id: str, websocket: WebSocket, message: Dict[str, Any]):
         """Handle subscription request."""
         try:
-            stream_type = StreamType(message.get("stream_type"))
-            symbol = message.get("symbol")
-            filters = message.get("filters", {})
+            # Support both "channels" list (new) and single "stream_type"/"symbol" (legacy)
+            channels = message.get("channels", [])
             
+            # If legacy format
+            if not channels and "stream_type" in message:
+                stream_type = message.get("stream_type")
+                symbol = message.get("symbol")
+                if stream_type:
+                    channels.append(f"{stream_type}:{symbol}" if symbol else stream_type)
+
             # Get user ID from connection
             user_id = self.connection_manager.connection_users.get(connection_id)
             if not user_id:
                 await self._send_error(websocket, "Invalid connection")
                 return
+
+            subscribed_channels = []
             
-            # Create subscription
-            subscription = Subscription(
-                user_id=user_id,
-                stream_type=stream_type,
-                symbol=symbol,
-                filters=filters,
-                status=SubscriptionStatus.CONNECTED,
-                created_at=datetime.utcnow()
-            )
-            
-            # Add subscription
-            self.connection_manager.add_subscription(user_id, subscription)
-            
+            for channel in channels:
+                try:
+                    stream_type = None
+                    symbol = None
+                    
+                    if ":" in channel:
+                        type_str, symbol = channel.split(":", 1)
+                    else:
+                        type_str = channel
+                        
+                    # Map string type to Enum
+                    # We need to map "positions" -> StreamType.POSITIONS
+                    # Assuming StreamType values match the string prefixes
+                    # Let's check StreamType enum in connection_manager.py
+                    # Based on existing code: "positions" -> StreamType.POSITIONS
+                    
+                    if type_str == "positions":
+                        stream_type = StreamType.POSITIONS
+                    elif type_str == "orders":
+                        stream_type = StreamType.ORDERS
+                    elif type_str == "trades":
+                        stream_type = StreamType.TRADES
+                    elif type_str == "orderbook":
+                        stream_type = StreamType.ORDERBOOK
+                    elif type_str == "BOT_STATS":
+                        stream_type = StreamType.BOT_STATS
+                    elif type_str == "BOT_STATUS":
+                        stream_type = StreamType.BOT_STATUS
+                    elif type_str == "RISK_ALERTS":
+                        stream_type = StreamType.RISK_ALERTS
+                    # Add other types if needed
+                    
+                    if stream_type:
+                         # Create subscription
+                        subscription = Subscription(
+                            user_id=user_id,
+                            stream_type=stream_type,
+                            symbol=symbol,
+                            filters=message.get("filters", {}),
+                            status=SubscriptionStatus.CONNECTED,
+                            created_at=datetime.utcnow()
+                        )
+                        
+                        # Add subscription
+                        self.connection_manager.add_subscription(user_id, subscription)
+                        subscribed_channels.append(channel)
+                        logger.info(f"User {user_id} subscribed to {channel} SUCCESS")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to subscribe to {channel}: {e}")
+
             # Send confirmation
             await self._send_message(websocket, {
                 "type": "subscription",
                 "status": "subscribed",
-                "stream_type": stream_type.value,
-                "symbol": symbol,
+                "channels": subscribed_channels,
                 "timestamp": datetime.utcnow().isoformat()
             })
             
-            logger.info(f"User {user_id} subscribed to {stream_type.value}:{symbol}")
-            
-        except ValueError as e:
-            await self._send_error(websocket, f"Invalid stream type: {e}")
         except Exception as e:
             logger.error(f"Subscription error: {e}")
             await self._send_error(websocket, "Subscription failed")
@@ -247,6 +391,10 @@ class WebSocketManager:
             except Exception as e:
                 logger.error(f"Error sending risk alert to user {user_id}: {e}")
     
+    def _get_timestamp(self) -> str:
+        """Get current timestamp in ISO format."""
+        return datetime.utcnow().isoformat()
+    
     async def broadcast_bot_status_update(self, user_id: str, bot_data: Dict[str, Any]):
         """Broadcast bot status update to specific user."""
         message = StreamMessage(
@@ -264,6 +412,33 @@ class WebSocketManager:
                 await websocket.send_text(message.to_json())
             except Exception as e:
                 logger.error(f"Error sending bot status to user {user_id}: {e}")
+    
+    async def broadcast_bot_stats_update(self, user_id: str, bot_id: str, stats: Dict[str, Any]):
+        """
+        Broadcast bot statistics update to specific user.
+        
+        Called when a trade closes and bot stats are updated.
+        Stats dict should contain: total_pnl, win_rate, total_trades, 
+        winning_trades, losing_trades, and streak counters.
+        """
+        message = StreamMessage(
+            stream_type=StreamType.BOT_STATS,
+            symbol=None,  # Bot stats are not symbol-specific
+            data={
+                "bot_id": bot_id,
+                **stats
+            },
+            timestamp=datetime.utcnow(),
+            user_id=user_id
+        )
+        
+        # Send to user's connections
+        connections = self.connection_manager.get_user_connections(user_id)
+        for websocket in connections:
+            try:
+                await websocket.send_text(message.to_json())
+            except Exception as e:
+                logger.error(f"Error sending bot stats to user {user_id}: {e}")
     
     def get_stats(self) -> Dict[str, int]:
         """Get WebSocket statistics."""

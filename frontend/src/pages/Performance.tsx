@@ -8,6 +8,7 @@ import {
 import { TrendingUp, TrendingDown, Target, Percent, Activity, DollarSign } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/api/client';
 
 // API Response Interfaces
 interface PerformanceOverview {
@@ -55,28 +56,27 @@ export default function Performance() {
     const fetchData = async () => {
       try {
         setLoading(true);
-        // Fetch all required data in parallel
+        // Fetch all required data in parallel with error handling for each
         const [overviewRes, monthlyRes, dailyRes, botRes] = await Promise.all([
-          fetch('/api/performance/overview'),
-          fetch('/api/performance/returns/monthly?months=12'),
-          fetch('/api/performance/returns/daily?days=90'),
-          fetch('/api/performance/metrics/by-bot')
+          apiClient.get<PerformanceOverview>('/api/performance/overview').catch(e => null),
+          apiClient.get<MonthlyPerformance[]>('/api/performance/returns/monthly?months=12').catch(e => null),
+          apiClient.get<DailyReturn[]>('/api/performance/returns/daily?days=90').catch(e => null),
+          apiClient.get<BotPerformance[]>('/api/performance/metrics/by-bot').catch(e => null)
         ]);
 
-        if (overviewRes.ok) {
-          const data = await overviewRes.json();
-          setOverview(data);
+        if (overviewRes?.data) {
+          setOverview(overviewRes.data);
         }
 
         let totalTrades = 0;
-        if (monthlyRes.ok) {
-          const data: MonthlyPerformance[] = await monthlyRes.json();
+        if (monthlyRes?.data) {
+          const data = monthlyRes.data;
           setMonthlyData(data);
           totalTrades = data.reduce((sum, item) => sum + item.trades_count, 0);
         }
 
-        if (dailyRes.ok) {
-          const data: DailyReturn[] = await dailyRes.json();
+        if (dailyRes?.data) {
+          const data = dailyRes.data;
           setDailyReturns(data);
 
           // Calculate drawdown curve
@@ -95,9 +95,8 @@ export default function Performance() {
           setDrawdownData(drawdowns);
         }
 
-        if (botRes.ok) {
-          const data = await botRes.json();
-          setBotPerformance(data);
+        if (botRes?.data) {
+          setBotPerformance(botRes.data);
         }
 
         // Calculate trade distribution if we have total trades and win rate

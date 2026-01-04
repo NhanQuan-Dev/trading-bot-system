@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...domain.user import User, Email, HashedPassword
 from ...domain.user.repository import IUserRepository
 from ..persistence.models.core_models import UserModel
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class UserRepository(IUserRepository):
@@ -62,6 +65,7 @@ class UserRepository(IUserRepository):
         Returns:
             User entity or None if not found
         """
+        logger.info(f"Finding user by ID: {user_id} (Type: {type(user_id)})")
         stmt = select(UserModel).where(
             UserModel.id == user_id,
             UserModel.deleted_at.is_(None)

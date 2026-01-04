@@ -141,7 +141,9 @@ class JobQueue:
             return job_id
             
         except Exception as e:
-            logger.error(f"Failed to enqueue job {name}: {e}")
+            logger.error(f"Failed to enqueue job {name}: {e!r} (type={type(e)})")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
     
     async def dequeue(self, timeout: int = 5) -> Optional[Job]:
@@ -311,6 +313,67 @@ class JobQueue:
         except Exception as e:
             logger.error(f"Error cancelling job {job_id}: {e}")
             return False
+    
+    async def cancel_jobs_by_backtest_id(self, backtest_id: str) -> int:
+        """
+        Cancel all pending jobs related to a backtest.
+        
+        Searches job args for job_id containing the backtest_id pattern.
+        This is used when deleting a backtest to stop all related fetch jobs.
+        
+        Args:
+            backtest_id: The backtest UUID to cancel jobs for
+            
+        Returns:
+            Number of jobs cancelled
+        """
+        cancelled_count = 0
+        backtest_id_str = str(backtest_id)
+        
+        try:
+            # Check all priority queues
+            for priority, queue_key in self.queues.items():
+                # Get all job IDs in queue (without removing)
+                job_ids = await self.redis.lrange(queue_key, 0, -1)
+                
+                for job_id in job_ids:
+                    job = await self.get_job(job_id)
+                    if not job:
+                        continue
+                    
+                    # Check if job belongs to this backtest
+                    # Jobs are identified by job_id containing backtest_id OR args containing backtest info
+                    job_arg_id = job.args.get('job_id', '')
+                    
+                    if backtest_id_str in str(job_arg_id) or backtest_id_str in str(job.id):
+                        # Cancel this job
+                        if await self.cancel_job(job_id):
+                            # Remove from queue
+                            await self.redis.lrem(queue_key, 1, job_id)
+                            cancelled_count += 1
+                            print(f"DEBUG [JobQueue]: Cancelled job {job_id} for backtest {backtest_id_str}")
+            
+            # Also check scheduled set
+            scheduled_jobs = await self.redis.zrange(self.scheduled_set, 0, -1)
+            for job_id in scheduled_jobs:
+                job = await self.get_job(job_id)
+                if not job:
+                    continue
+                
+                job_arg_id = job.args.get('job_id', '')
+                if backtest_id_str in str(job_arg_id) or backtest_id_str in str(job.id):
+                    if await self.cancel_job(job_id):
+                        cancelled_count += 1
+                        print(f"DEBUG [JobQueue]: Cancelled scheduled job {job_id} for backtest {backtest_id_str}")
+            
+            if cancelled_count > 0:
+                logger.info(f"Cancelled {cancelled_count} jobs for backtest {backtest_id_str}")
+            
+            return cancelled_count
+            
+        except Exception as e:
+            logger.error(f"Error cancelling jobs for backtest {backtest_id}: {e}")
+            return cancelled_count
     
     async def get_job_result(self, job_id: str) -> Optional[Any]:
         """Get job result."""

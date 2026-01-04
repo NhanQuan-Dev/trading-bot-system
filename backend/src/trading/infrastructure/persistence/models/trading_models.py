@@ -22,9 +22,9 @@ class OrderModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
         Index('idx_orders_position_id', 'position_id'),
         Index('idx_orders_bot_id', 'bot_id'),
         Index('idx_orders_deleted_at', 'deleted_at'),
-        CheckConstraint("side IN ('LONG', 'SHORT')", name='ck_orders_side'),
+        CheckConstraint("side IN ('BUY', 'SELL')", name='ck_orders_side'),
         CheckConstraint("order_type IN ('MARKET', 'LIMIT', 'STOP_MARKET', 'STOP_LIMIT', 'TRAILING_STOP')", name='ck_orders_type'),
-        CheckConstraint("status IN ('PENDING', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')", name='ck_orders_status'),
+        CheckConstraint("status IN ('PENDING', 'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')", name='ck_orders_status'),
         CheckConstraint("time_in_force IN ('GTC', 'IOC', 'FOK', 'GTX')", name='ck_orders_tif'),
         CheckConstraint("margin_mode IN ('ISOLATED', 'CROSS')", name='ck_orders_margin_mode'),
         CheckConstraint("position_mode IN ('ONE_WAY', 'HEDGE')", name='ck_orders_position_mode'),
@@ -59,6 +59,7 @@ class OrderModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     # Status tracking
     status = Column(String(20), nullable=False, default="PENDING", comment="Order status")
     exchange_order_id = Column(String(100), nullable=True, unique=True, comment="Exchange order ID")
+    client_order_id = Column(String(100), nullable=True, unique=True, comment="Client order ID")
     filled_quantity = Column(DECIMAL(20, 8), nullable=False, default=Decimal("0"), comment="Filled quantity")
     filled_avg_price = Column(DECIMAL(20, 8), nullable=True, comment="Average fill price")
     
@@ -149,6 +150,8 @@ class TradeModel(Base, UUIDPrimaryKeyMixin):
         {'comment': 'Trade executions (immutable, partitioned by executed_at monthly)'}
     )
     
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    bot_id = Column(UUID(as_uuid=True), ForeignKey('bots.id', ondelete='SET NULL'), nullable=True, comment="Bot executed this trade")
     position_id = Column(UUID(as_uuid=True), ForeignKey('positions.id', ondelete='RESTRICT'), nullable=False)
     order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='RESTRICT'), nullable=False)
     exchange_id = Column(Integer, ForeignKey('exchanges.id', ondelete='RESTRICT'), nullable=False)

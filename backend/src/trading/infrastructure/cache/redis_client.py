@@ -26,6 +26,7 @@ class RedisClient:
         
         try:
             # Create connection pool
+            logger.info(f"Connecting to Redis at {settings.REDIS_HOST}:{settings.REDIS_PORT} db={settings.REDIS_DB}")
             self._connection_pool = redis.ConnectionPool(
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
@@ -51,7 +52,7 @@ class RedisClient:
             logger.info("Redis connected successfully")
             
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.error(f"Failed to connect to Redis: {e!r} (str={e})")
             self._is_connected = False
             raise
     
@@ -70,7 +71,9 @@ class RedisClient:
     
     async def ensure_connected(self):
         """Ensure Redis is connected, reconnect if necessary."""
+        # logger.info(f"Checking Redis connection: connected={self._is_connected}, redis={self._redis is not None}")
         if not self._is_connected or not self._redis:
+            logger.info("Redis not connected, connecting now...")
             await self.connect()
     
     async def zrangebyscore(self, key: str, min_score: float, max_score: float, withscores: bool = False, start: int = 0, num: int = -1):

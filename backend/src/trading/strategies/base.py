@@ -22,18 +22,20 @@ class StrategyBase(ABC):
     - on_tick: Main logic called on market updates
     """
     
-    def __init__(self, exchange: ExchangeGateway, config: Dict[str, Any]):
+    def __init__(self, exchange: ExchangeGateway, config: Dict[str, Any], on_order=None):
         """
         Initialize strategy.
         
         Args:
             exchange: The exchange gateway instance
             config: Strategy configuration parameters
+            on_order: Async callback function(order_dict) -> None
         """
         self.exchange = exchange
         self.config = config
         self.position = None
         self.orders = []
+        self.on_order = on_order
 
     @property
     @abstractmethod
@@ -73,7 +75,7 @@ class StrategyBase(ABC):
         order_type = "LIMIT" if price else "MARKET"
         logger.info(f"[{self.name}] Placing BUY {order_type} on {symbol}: {quantity} @ {price or 'Market'}")
         
-        return await self.exchange.create_order(
+        response = await self.exchange.create_order(
             symbol=symbol,
             side="BUY",
             type=order_type,
@@ -81,6 +83,23 @@ class StrategyBase(ABC):
             price=price,
             **kwargs
         )
+        
+        if self.on_order:
+            try:
+                # Add metadata to response for the callback
+                await self.on_order({
+                    **response,
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "type": order_type,
+                    "quantity": quantity,
+                    "price": price,
+                    "status": response.get("status", "NEW")
+                })
+            except Exception as e:
+                logger.error(f"Error in on_order callback: {e}")
+                
+        return response
 
     async def sell(self, symbol: str, quantity: Decimal, price: Optional[Decimal] = None, **kwargs) -> Dict[str, Any]:
         """
@@ -98,7 +117,7 @@ class StrategyBase(ABC):
         order_type = "LIMIT" if price else "MARKET"
         logger.info(f"[{self.name}] Placing SELL {order_type} on {symbol}: {quantity} @ {price or 'Market'}")
         
-        return await self.exchange.create_order(
+        response = await self.exchange.create_order(
             symbol=symbol,
             side="SELL",
             type=order_type,
@@ -106,6 +125,22 @@ class StrategyBase(ABC):
             price=price,
             **kwargs
         )
+
+        if self.on_order:
+            try:
+                await self.on_order({
+                    **response,
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "type": order_type,
+                    "quantity": quantity,
+                    "price": price,
+                    "status": response.get("status", "NEW")
+                })
+            except Exception as e:
+                logger.error(f"Error in on_order callback: {e}")
+
+        return response
         
     async def cancel_all(self, symbol: str) -> None:
         """Cancel all open orders for symbol."""

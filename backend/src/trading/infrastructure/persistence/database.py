@@ -85,9 +85,10 @@ async def get_db_context():
     """Get database session as context manager (for startup/shutdown operations)."""
     async with AsyncSessionLocal() as session:
         try:
+            # logger.info("DEBUG: DB Start Transaction")
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
             await session.rollback()
             raise
         finally:

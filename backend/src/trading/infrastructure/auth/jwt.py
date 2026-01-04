@@ -77,6 +77,8 @@ def create_access_token(user_id: uuid.UUID, expires_delta: Optional[timedelta] =
     )
     
     encoded_jwt = jwt.encode(payload.to_dict(), SECRET_KEY, algorithm=ALGORITHM)
+    if isinstance(encoded_jwt, bytes):
+        encoded_jwt = encoded_jwt.decode('utf-8')
     return encoded_jwt
 
 
@@ -106,6 +108,8 @@ def create_refresh_token(user_id: uuid.UUID, expires_delta: Optional[timedelta] 
     )
     
     encoded_jwt = jwt.encode(payload.to_dict(), SECRET_KEY, algorithm=ALGORITHM)
+    if isinstance(encoded_jwt, bytes):
+        encoded_jwt = encoded_jwt.decode('utf-8')
     return encoded_jwt
 
 

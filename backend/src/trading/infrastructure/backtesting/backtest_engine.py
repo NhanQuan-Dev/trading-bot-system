@@ -74,7 +74,17 @@ class BacktestEngine:
         """
         
         logger.info(f"Starting backtest with {len(candles)} candles")
-        backtest_run.start()
+        
+        # Only start if still pending (might already be RUNNING if use case started it during data fetch)
+        # Handle both enum (BacktestStatus.PENDING) and string ('pending') comparisons
+        current_status = backtest_run.status
+        is_pending = (
+            current_status == BacktestStatus.PENDING or 
+            (isinstance(current_status, str) and current_status.lower() == 'pending')
+        )
+        
+        if is_pending:
+            backtest_run.start()
         
         try:
             # Process each candle
@@ -86,8 +96,11 @@ class BacktestEngine:
                 # Process candle
                 self._process_candle(candle, strategy_func, idx)
                 
-                # Update progress
-                if progress_callback and idx % 10 == 0:
+                # Update progress (limit frequency to avoid DB spam)
+                # Update approx every 1% or every 100 candles, whichever is larger
+                update_step = max(100, int(total_candles / 100))
+                
+                if progress_callback and idx % update_step == 0:
                     percent = int((idx / total_candles) * 100)
                     backtest_run.update_progress(percent)
                     await progress_callback(percent)
@@ -233,10 +246,10 @@ class BacktestEngine:
         self.current_position.stop_loss = signal.get("stop_loss")
         self.current_position.take_profit = signal.get("take_profit")
         self.current_position.entry_time = timestamp
+        self.current_position.entry_commission = fill.commission
         
-        # Deduct cost from equity
-        cost = fill.filled_price * fill.filled_quantity + fill.commission
-        self.equity -= cost
+        # Note: Don't modify equity when opening position
+        # Equity will be updated when position is closed with realized PnL
         
         logger.debug(f"Opened LONG: {fill.filled_quantity} @ {fill.filled_price}")
     
@@ -273,10 +286,10 @@ class BacktestEngine:
         self.current_position.stop_loss = signal.get("stop_loss")
         self.current_position.take_profit = signal.get("take_profit")
         self.current_position.entry_time = timestamp
+        self.current_position.entry_commission = fill.commission
         
-        # Add proceeds to equity
-        proceeds = fill.filled_price * fill.filled_quantity - fill.commission
-        self.equity += proceeds
+        # Note: Don't modify equity when opening position
+        # Equity will be updated when position is closed with realized PnL
         
         logger.debug(f"Opened SHORT: {fill.filled_quantity} @ {fill.filled_price}")
     
@@ -310,17 +323,21 @@ class BacktestEngine:
         if fill.filled_quantity == 0:
             return
         
-        # Calculate P&L
+        # Calculate P&L (same formula for both LONG and SHORT)
         if self.current_position.direction == TradeDirection.LONG:
+            # LONG: profit when exit > entry
             pnl = (fill.filled_price - self.current_position.avg_entry_price) * fill.filled_quantity
-            self.equity += fill.filled_price * fill.filled_quantity - fill.commission
         else:
+            # SHORT: profit when entry > exit 
             pnl = (self.current_position.avg_entry_price - fill.filled_price) * fill.filled_quantity
-            self.equity -= fill.filled_price * fill.filled_quantity + fill.commission
         
-        # Calculate net P&L and percentage
-        total_costs = fill.commission + fill.slippage
+        # Calculate total costs (entry + exit commissions)
+        entry_commission = getattr(self.current_position, 'entry_commission', Decimal("0"))
+        total_costs = entry_commission + fill.commission + fill.slippage
         net_pnl = pnl - total_costs
+        
+        # Update equity with net P&L
+        self.equity += net_pnl
         
         entry_value = self.current_position.avg_entry_price * fill.filled_quantity
         pnl_percent = (net_pnl / entry_value) * Decimal("100") if entry_value > 0 else Decimal("0")

@@ -165,8 +165,8 @@ class DeleteMarketDataSubscriptionUseCase:
 class GetCandleDataUseCase:
     """Use case for retrieving candle data."""
     
-    def __init__(self, candle_repository: ICandleRepository):
-        self.candle_repository = candle_repository
+    def __init__(self, market_data_service):
+        self.market_data_service = market_data_service
     
     async def execute(
         self,
@@ -175,15 +175,55 @@ class GetCandleDataUseCase:
         start_time: Optional[dt] = None,
         end_time: Optional[dt] = None,
         limit: Optional[int] = None,
+        repair: bool = False
     ) -> List[Candle]:
         """Get candle data for symbol and interval."""
         
-        return await self.candle_repository.find_by_symbol_and_interval(
+        from datetime import timedelta
+        
+        # Default time range if not provided
+        if not start_time:
+             start_time = dt.utcnow() - timedelta(days=1)
+        if not end_time:
+             end_time = dt.utcnow()
+
+        # SMART LIMIT LOGIC:
+        # Calculate expected number of candles based on date range and interval
+        # No maximum cap - user wants unlimited candles
+        # NOTE: For very large datasets (>100K candles), consider implementing:
+        # - Chunked queries with asyncio.gather() for parallel fetching
+        # - Progressive loading on frontend
+        # - Database query optimization (indexes, partitioning)
+        
+        if limit is None:
+            # Calculate time difference in minutes
+            time_diff = (end_time - start_time).total_seconds() / 60
+            
+            # Map interval to minutes
+            interval_minutes_map = {
+                '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+                '1h': 60, '2h': 120, '4h': 240, '6h': 360,
+                '8h': 480, '12h': 720, '1d': 1440, '3d': 4320,
+                '1w': 10080, '1M': 43200  # Approximate for month
+            }
+            
+            interval_minutes = interval_minutes_map.get(interval.value, 60)  # Default to 1h
+            expected_candles = int(time_diff / interval_minutes)
+            
+            # No cap - return calculated expected count
+            # User accepts performance implications for large datasets
+            effective_limit = expected_candles if expected_candles > 0 else None
+        else:
+            # User explicitly provided limit, respect it
+            effective_limit = limit
+
+        return await self.market_data_service.get_historical_candles_domain(
             symbol=symbol,
-            interval=interval,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit
+            timeframe=interval.value,
+            start_date=start_time,
+            end_date=end_time,
+            limit=effective_limit,
+            repair=repair
         )
 
 

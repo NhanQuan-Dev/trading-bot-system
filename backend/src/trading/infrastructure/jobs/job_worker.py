@@ -153,6 +153,11 @@ class JobWorker:
                 job = await job_queue.dequeue()
                 
                 if job:
+                    print(f"DEBUG [JobWorker]: ========== JOB DEQUEUED ==========")
+                    print(f"DEBUG [JobWorker]: Job ID: {job.id}")
+                    print(f"DEBUG [JobWorker]: Job Name: {job.name}")
+                    print(f"DEBUG [JobWorker]: Job Args: {job.args}")
+                    print(f"DEBUG [JobWorker]: Job Timeout: {job.timeout}s")
                     self.stats.status = WorkerStatus.PROCESSING
                     task = asyncio.create_task(self._process_job(job))
                     self._current_jobs[job.id] = task
@@ -183,6 +188,7 @@ class JobWorker:
         self.stats.current_job = job.id
         self.stats.last_job_at = start_time
         
+        print(f"DEBUG [JobWorker]: >>> STARTING JOB {job.id} ({job.name})")
         logger.info(f"Worker {self.worker_id} processing job {job.id} ({job.name})")
         
         try:
@@ -190,13 +196,18 @@ class JobWorker:
             handler = self._handlers.get(job.name)
             
             if not handler:
+                print(f"DEBUG [JobWorker]: !!! NO HANDLER for job {job.name}")
                 raise ValueError(f"No handler registered for job: {job.name}")
+            
+            print(f"DEBUG [JobWorker]: Found handler for {job.name}, executing with timeout {job.timeout}s...")
             
             # Execute with timeout
             result = await asyncio.wait_for(
                 handler(job.args),
                 timeout=job.timeout
             )
+            
+            print(f"DEBUG [JobWorker]: <<< JOB COMPLETED {job.id} - Result: {result}")
             
             # Mark as completed
             await job_queue.complete_job(job, result)
@@ -205,12 +216,14 @@ class JobWorker:
             
         except asyncio.TimeoutError:
             error_msg = f"Job timed out after {job.timeout}s"
+            print(f"DEBUG [JobWorker]: !!! JOB TIMEOUT {job.id}: {error_msg}")
             logger.error(f"Job {job.id} ({job.name}): {error_msg}")
             await job_queue.fail_job(job, error_msg)
             self.stats.jobs_failed += 1
             
         except Exception as e:
             error_msg = str(e)
+            print(f"DEBUG [JobWorker]: !!! JOB FAILED {job.id}: {error_msg}")
             logger.error(f"Job {job.id} ({job.name}) failed: {error_msg}")
             await job_queue.fail_job(job, error_msg)
             self.stats.jobs_failed += 1
@@ -222,6 +235,7 @@ class JobWorker:
             # Update processing time
             elapsed = (datetime.utcnow() - start_time).total_seconds()
             self.stats.total_processing_time += elapsed
+            print(f"DEBUG [JobWorker]: Job {job.id} finished in {elapsed:.2f}s")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get worker statistics."""
@@ -257,9 +271,48 @@ job_worker = JobWorker(worker_id="main-worker")
 
 
 class WorkerPool:
-    """Pool of workers for parallel job processing."""
+    """Pool of workers for parallel job processing.
     
-    def __init__(self, num_workers: int = 3, max_concurrent_per_worker: int = 1):
+    Worker count is dynamically calculated based on external API rate limits
+    to maximize throughput while staying within limits.
+    """
+    
+    # Binance rate limit configuration
+    BINANCE_RATE_LIMIT_PER_MINUTE = 1200
+    SAFETY_FACTOR = 0.7  # Leave 30% headroom for other API calls
+    
+    @classmethod
+    def calculate_optimal_workers(
+        cls, 
+        rate_limit_per_minute: int = BINANCE_RATE_LIMIT_PER_MINUTE,
+        avg_job_duration_seconds: float = 1.0,
+        safety_factor: float = SAFETY_FACTOR
+    ) -> int:
+        """
+        Calculate optimal worker count based on rate limit.
+        
+        Formula: workers = (rate_limit_per_second) * avg_job_duration * safety_factor
+        
+        For Binance 1200/min:
+        - rate_limit_per_second = 1200 / 60 = 20
+        - With safety_factor 0.7 = 14 workers
+        """
+        rate_per_second = rate_limit_per_minute / 60
+        optimal = int(rate_per_second * avg_job_duration_seconds * safety_factor)
+        # Minimum 1, maximum 20 (to prevent too aggressive parallelism)
+        return max(1, min(optimal, 20))
+    
+    def __init__(
+        self, 
+        num_workers: int = None,  # None = auto-calculate
+        max_concurrent_per_worker: int = 1,
+        rate_limit_per_minute: int = BINANCE_RATE_LIMIT_PER_MINUTE
+    ):
+        # Auto-calculate if not specified
+        if num_workers is None:
+            num_workers = self.calculate_optimal_workers(rate_limit_per_minute)
+            print(f"DEBUG [WorkerPool]: Auto-calculated {num_workers} workers based on rate limit {rate_limit_per_minute}/min")
+        
         self.num_workers = num_workers
         self.max_concurrent_per_worker = max_concurrent_per_worker
         self.workers: List[JobWorker] = []
@@ -280,7 +333,7 @@ class WorkerPool:
             self.workers.append(worker)
             await worker.start()
         
-        logger.info(f"Worker pool started with {self.num_workers} workers")
+        logger.info(f"Worker pool started with {self.num_workers} workers (rate-limit optimized)")
     
     async def stop(self, wait_for_jobs: bool = True):
         """Stop all workers in the pool."""
@@ -314,5 +367,6 @@ class WorkerPool:
         }
 
 
-# Global worker pool
-worker_pool = WorkerPool()
+# Global worker pool - auto-calculates optimal workers based on Binance rate limit
+worker_pool = WorkerPool()  # Will auto-calculate ~14 workers
+

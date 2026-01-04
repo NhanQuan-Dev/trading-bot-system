@@ -26,6 +26,7 @@ class CreateBotRequest(BaseModel):
     """Create bot request."""
     name: str = Field(..., min_length=1, max_length=100, description="Bot name")
     description: Optional[str] = Field(None, max_length=500, description="Bot description")
+    strategy_id: uuid.UUID = Field(..., description="Strategy ID")
     configuration: BotConfigurationRequest
 
 
@@ -72,6 +73,7 @@ class BotResponse(BaseModel):
     user_id: uuid.UUID
     name: str
     description: Optional[str] = None
+    strategy_id: uuid.UUID
     configuration: BotConfigurationResponse
     status: str
     is_active: bool

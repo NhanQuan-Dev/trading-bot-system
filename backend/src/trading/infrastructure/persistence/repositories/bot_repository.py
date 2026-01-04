@@ -3,8 +3,10 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from sqlalchemy.orm import selectinload
+import logging
 import uuid
 from decimal import Decimal
+from datetime import datetime
 
 from ....domain.bot import (
     Bot, 
@@ -14,7 +16,8 @@ from ....domain.bot import (
     RiskLevel,
     BotConfiguration, 
     BotPerformance,
-    StrategyParameters
+    StrategyParameters,
+    BotType,
 )
 from ....domain.bot.repository import IBotRepository, IStrategyRepository
 from ..models.bot_models import BotModel, StrategyModel
@@ -41,15 +44,16 @@ class BotRepository(IBotRepository):
             strategy_settings=config_data.get("strategy_settings", {}),
             max_daily_loss=Decimal(str(config_data["max_daily_loss"])) if config_data.get("max_daily_loss") else None,
             max_drawdown=Decimal(str(config_data["max_drawdown"])) if config_data.get("max_drawdown") else None,
+            bot_type=BotType(config_data["bot_type"]) if config_data.get("bot_type") else None,
         )
         
-        # Parse performance
-        perf_data = model.performance
+        # Parse performance (legacy JSON column mixed with new columns)
+        perf_data = model.performance or {}
         performance = BotPerformance(
-            total_trades=perf_data.get("total_trades", 0),
-            winning_trades=perf_data.get("winning_trades", 0),
-            losing_trades=perf_data.get("losing_trades", 0),
-            total_profit_loss=Decimal(str(perf_data.get("total_profit_loss", "0"))),
+            total_trades=model.total_trades if model.total_trades else perf_data.get("total_trades", 0),
+            winning_trades=model.winning_trades if model.winning_trades else perf_data.get("winning_trades", 0),
+            losing_trades=model.losing_trades if model.losing_trades else perf_data.get("losing_trades", 0),
+            total_profit_loss=model.total_pnl if model.total_pnl is not None else Decimal(str(perf_data.get("total_profit_loss", "0"))),
             total_fees=Decimal(str(perf_data.get("total_fees", "0"))),
             max_drawdown=Decimal(str(perf_data.get("max_drawdown", "0"))),
             sharpe_ratio=Decimal(str(perf_data["sharpe_ratio"])) if perf_data.get("sharpe_ratio") else None,
@@ -64,18 +68,28 @@ class BotRepository(IBotRepository):
             exchange_connection_id=model.exchange_connection_id,
             status=BotStatus(model.status),
             configuration=configuration,
-            created_at=model.created_at,
-            updated_at=model.updated_at,
+            created_at=datetime.fromisoformat(str(model.created_at)) if isinstance(model.created_at, str) else model.created_at,
+            updated_at=datetime.fromisoformat(str(model.updated_at)) if isinstance(model.updated_at, str) else model.updated_at,
             description=model.description,
             risk_level=RiskLevel(model.risk_level),
-            start_time=model.start_time,
-            stop_time=model.stop_time,
+            start_time=datetime.fromisoformat(str(model.start_time)) if isinstance(model.start_time, str) else model.start_time,
+            stop_time=datetime.fromisoformat(str(model.stop_time)) if isinstance(model.stop_time, str) else model.stop_time,
             last_error=model.last_error,
             performance=performance,
             active_orders=model.active_orders,
             daily_pnl=model.daily_pnl,
             total_runtime_seconds=model.total_runtime_seconds,
-            metadata=model.metadata,
+            metadata=model.meta_data,
+            # NEW: Map cumulative stats from DB columns
+            total_pnl=model.total_pnl or Decimal("0"),
+            total_trades=model.total_trades or 0,
+            winning_trades=model.winning_trades or 0,
+            losing_trades=model.losing_trades or 0,
+            # NEW: Map streak fields from DB columns
+            current_win_streak=model.current_win_streak or 0,
+            current_loss_streak=model.current_loss_streak or 0,
+            max_win_streak=model.max_win_streak or 0,
+            max_loss_streak=model.max_loss_streak or 0,
         )
     
     def _domain_to_model_data(self, bot: Bot) -> dict:
@@ -100,6 +114,7 @@ class BotRepository(IBotRepository):
                 "strategy_settings": bot.configuration.strategy_settings,
                 "max_daily_loss": str(bot.configuration.max_daily_loss) if bot.configuration.max_daily_loss else None,
                 "max_drawdown": str(bot.configuration.max_drawdown) if bot.configuration.max_drawdown else None,
+                "bot_type": bot.configuration.bot_type.value if bot.configuration.bot_type else None,
             },
             "start_time": bot.start_time,
             "stop_time": bot.stop_time,
@@ -116,7 +131,7 @@ class BotRepository(IBotRepository):
             "active_orders": bot.active_orders,
             "daily_pnl": bot.daily_pnl,
             "total_runtime_seconds": bot.total_runtime_seconds,
-            "metadata": bot.metadata,
+            "meta_data": bot.metadata,
             "created_at": bot.created_at,
             "updated_at": bot.updated_at,
         }
@@ -200,7 +215,7 @@ class BotRepository(IBotRepository):
         """Find all active bots across all users."""
         stmt = select(BotModel).where(
             and_(
-                BotModel.status.in_([BotStatus.ACTIVE.value, BotStatus.STARTING.value]),
+                BotModel.status == BotStatus.RUNNING.value,
                 BotModel.deleted_at.is_(None)
             )
         ).order_by(BotModel.updated_at.desc())
@@ -242,17 +257,18 @@ class StrategyRepository(IStrategyRepository):
     
     def _model_to_domain(self, model: StrategyModel) -> Strategy:
         """Convert database model to domain entity."""
-        # Parse parameters
-        params_data = model.parameters
+        # Parse parameters - parameters column contains only strategy-specific params
+        # NOT name/description (those are separate columns in the table)
+        params_data = model.parameters or {}
         parameters = StrategyParameters(
             strategy_type=StrategyType(model.strategy_type),
-            name=params_data["name"],
-            description=params_data["description"],
-            parameters=params_data["parameters"]
+            name=model.name,  # ✅ FIX: Use model.name column
+            description=model.description or "",  # ✅ FIX: Use model.description column
+            parameters=params_data  # ✅ FIX: Use entire params_data dict
         )
         
         # Parse performance
-        perf_data = model.live_performance
+        perf_data = model.live_performance or {}
         live_performance = BotPerformance(
             total_trades=perf_data.get("total_trades", 0),
             winning_trades=perf_data.get("winning_trades", 0),
@@ -331,14 +347,32 @@ class StrategyRepository(IStrategyRepository):
     
     async def find_by_id(self, strategy_id: uuid.UUID) -> Optional[Strategy]:
         """Find strategy by ID."""
+        print(f"\n\n=== STRATEGY REPOSITORY find_by_id CALLED ===")
+        print(f"=== Strategy ID: {strategy_id} ===")
+        print(f"=== Session: {self._session} ===\n")
+        logger = logging.getLogger(__name__)
         stmt = select(StrategyModel).where(
             and_(StrategyModel.id == strategy_id, StrategyModel.deleted_at.is_(None))
         )
+        print(f"DEBUG: StrategyRepository.find_by_id: {strategy_id}")
+        print(f"DEBUG: SQL: {stmt}")
+        
         result = await self._session.execute(stmt)
         model = result.scalar_one_or_none()
+        print(f"DEBUG: StrategyRepository found model: {model}")
         
         if model:
-            return self._model_to_domain(model)
+            print(f"DEBUG: Model found! ID={model.id}, name={model.name}, type={model.strategy_type}")
+            print(f"DEBUG: Parameters: {model.parameters}")
+            print(f"DEBUG: Live Performance: {model.live_performance}")
+            try:
+                domain = self._model_to_domain(model)
+                print(f"DEBUG: Successfully converted to domain: {domain.name}")
+                return domain
+            except Exception as e:
+                print(f"ERROR: Failed to convert model to domain: {e}")
+                logger.error(f"Failed to convert strategy model to domain: {e}", exc_info=True)
+                return None
         return None
     
     async def find_by_user(self, user_id: uuid.UUID) -> List[Strategy]:
@@ -402,170 +436,6 @@ class StrategyRepository(IStrategyRepository):
             from datetime import datetime, timezone
             model.deleted_at = datetime.now(timezone.utc)
             await self._session.commit()
-            # TODO: Implement proper strategy selection when Strategy domain is complete
-            default_strategy_stmt = select(StrategyModel).limit(1)
-            strategy_result = await self._session.execute(default_strategy_stmt)
-            default_strategy = strategy_result.scalar_one()
-            
-            model = BotModel(
-                id=bot.id,
-                user_id=bot.user_id,
-                strategy_id=default_strategy.id,
-                name=bot.name,
-                config={
-                    "description": bot.description,
-                    "bot_type": bot.configuration.bot_type.value,
-                    "symbol": bot.configuration.symbol,
-                    "exchange_connection_id": str(bot.configuration.exchange_connection_id),
-                    "max_position_size": bot.configuration.max_position_size,
-                    "max_open_orders": bot.configuration.max_open_orders,
-                    "leverage": bot.configuration.leverage,
-                    "strategy_params": bot.configuration.strategy_params,
-                    "stop_loss_pct": bot.configuration.stop_loss_pct,
-                    "take_profit_pct": bot.configuration.take_profit_pct,
-                    "max_daily_loss": bot.configuration.max_daily_loss,
-                    "started_at": bot.started_at.isoformat() if bot.started_at else None,
-                    "stopped_at": bot.stopped_at.isoformat() if bot.stopped_at else None,
-                    "last_trade_at": bot.last_trade_at.isoformat() if bot.last_trade_at else None,
-                    "is_active": bot.is_active,
-                },
-                status=bot.status.value,
-                performance_stats={
-                    "total_trades": bot.metrics.total_trades,
-                    "winning_trades": bot.metrics.winning_trades,
-                    "losing_trades": bot.metrics.losing_trades,
-                    "total_profit": bot.metrics.total_profit,
-                    "total_loss": bot.metrics.total_loss,
-                    "win_rate": bot.metrics.win_rate,
-                    "avg_profit": bot.metrics.avg_profit,
-                    "avg_loss": bot.metrics.avg_loss,
-                    "max_drawdown": bot.metrics.max_drawdown,
-                    "sharpe_ratio": bot.metrics.sharpe_ratio,
-                },
-                last_run_at=bot.last_trade_at,
-                error_message=bot.error_message,
-            )
-            self._session.add(model)
-        
-        await self._session.flush()
-    
-    async def find_by_id(self, bot_id: uuid.UUID) -> Optional[Bot]:
-        """Find bot by ID."""
-        stmt = select(BotModel).where(
-            BotModel.id == bot_id,
-            BotModel.deleted_at.is_(None)
-        )
-        result = await self._session.execute(stmt)
-        model = result.scalar_one_or_none()
-        
-        if not model:
-            return None
-        
-        return self._to_domain(model)
-    
-    async def find_by_user(self, user_id: uuid.UUID) -> List[Bot]:
-        """Find all bots for a user."""
-        stmt = (
-            select(BotModel)
-            .where(
-                BotModel.user_id == user_id,
-                BotModel.deleted_at.is_(None)
-            )
-            .order_by(BotModel.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        
-        return [self._to_domain(model) for model in result.scalars()]
-    
-    async def find_active_by_user(self, user_id: uuid.UUID) -> List[Bot]:
-        """Find active (running) bots for a user."""
-        stmt = (
-            select(BotModel)
-            .where(
-                BotModel.user_id == user_id,
-                BotModel.is_active == True,
-                BotModel.deleted_at.is_(None)
-            )
-            .order_by(BotModel.started_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        
-        return [self._to_domain(model) for model in result.scalars()]
-    
-    async def find_by_status(self, user_id: uuid.UUID, status: BotStatus) -> List[Bot]:
-        """Find bots by status for a user."""
-        stmt = (
-            select(BotModel)
-            .where(
-                BotModel.user_id == user_id,
-                BotModel.status == status.value,
-                BotModel.deleted_at.is_(None)
-            )
-            .order_by(BotModel.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        
-        return [self._to_domain(model) for model in result.scalars()]
-    
-    async def delete(self, bot_id: uuid.UUID) -> None:
-        """Delete bot (soft delete)."""
-        stmt = select(BotModel).where(BotModel.id == bot_id)
-        result = await self._session.execute(stmt)
-        model = result.scalar_one_or_none()
-        
-        if model:
-            model.soft_delete()
-            await self._session.flush()
-    
-    def _to_domain(self, model: BotModel) -> Bot:
-        """Convert model to domain entity."""
-        from datetime import datetime
-        
-        config_data = model.config or {}
-        metrics_data = model.performance_stats or {}
-        
-        # Parse timestamps from config
-        def parse_dt(s):
-            return datetime.fromisoformat(s) if s else None
-        
-        return Bot(
-            id=model.id,
-            user_id=model.user_id,
-            name=model.name,
-            description=config_data.get("description"),
-            configuration=BotConfiguration(
-                bot_type=BotType(config_data.get("bot_type", "CUSTOM")),
-                symbol=config_data.get("symbol", ""),
-                exchange_connection_id=uuid.UUID(config_data.get("exchange_connection_id", str(uuid.uuid4()))),
-                max_position_size=config_data.get("max_position_size", 0.0),
-                max_open_orders=config_data.get("max_open_orders", 1),
-                leverage=config_data.get("leverage", 1),
-                strategy_params=config_data.get("strategy_params", {}),
-                stop_loss_pct=config_data.get("stop_loss_pct"),
-                take_profit_pct=config_data.get("take_profit_pct"),
-                max_daily_loss=config_data.get("max_daily_loss"),
-            ),
-            status=BotStatus(model.status),
-            metrics=BotMetrics(
-                total_trades=metrics_data.get("total_trades", 0),
-                winning_trades=metrics_data.get("winning_trades", 0),
-                losing_trades=metrics_data.get("losing_trades", 0),
-                total_profit=metrics_data.get("total_profit", 0.0),
-                total_loss=metrics_data.get("total_loss", 0.0),
-                win_rate=metrics_data.get("win_rate", 0.0),
-                avg_profit=metrics_data.get("avg_profit", 0.0),
-                avg_loss=metrics_data.get("avg_loss", 0.0),
-                max_drawdown=metrics_data.get("max_drawdown", 0.0),
-                sharpe_ratio=metrics_data.get("sharpe_ratio"),
-            ),
-            is_active=config_data.get("is_active", False),
-            started_at=parse_dt(config_data.get("started_at")),
-            stopped_at=parse_dt(config_data.get("stopped_at")),
-            last_trade_at=parse_dt(config_data.get("last_trade_at")) or model.last_run_at,
-            error_message=model.error_message,
-            created_at=model.created_at,
-            updated_at=model.updated_at,
-        )
 
 
-__all__ = ["BotRepository"]
+__all__ = ["BotRepository", "StrategyRepository"]

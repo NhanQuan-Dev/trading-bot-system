@@ -1,11 +1,19 @@
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { apiClient } from '@/lib/api/client';
 import { useParams, useNavigate } from 'react-router-dom';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useAppStore } from '@/lib/store';
-import { ArrowLeft, Play, Pause, Settings, TrendingUp, TrendingDown } from 'lucide-react';
+import { ArrowLeft, Play, Pause, Settings, TrendingUp, TrendingDown, Wifi, WifiOff, CircleDollarSign, Coins, Loader2, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useBotStatsWebSocket, parseBotStats, BotStats } from '@/hooks/use-bot-stats-websocket';
+import { useBotPositionsWebSocket } from '@/hooks/use-bot-positions-websocket';
+import { useMarketData } from '@/hooks/use-market-data';
+import { useCandleData } from '@/hooks/use-candle-data';
+import { PriceExplosion } from '@/components/effects/PriceExplosion';
+import { FlashPrice } from '@/components/FlashPrice';
 import {
   Table,
   TableBody,
@@ -15,16 +23,9 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  ComposedChart,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  Bar,
-  Cell,
-  ReferenceLine,
-} from 'recharts';
+import Plot from 'react-plotly.js';
+
+
 
 // Mock candlestick data
 const generateCandleData = () => {
@@ -51,118 +52,385 @@ const generateCandleData = () => {
   return data;
 };
 
-// Mock order depth data
-const mockOrderDepth = {
-  bids: [
-    { price: 43450, amount: 2.5, total: 108625 },
-    { price: 43440, amount: 1.8, total: 78192 },
-    { price: 43430, amount: 3.2, total: 138976 },
-    { price: 43420, amount: 0.9, total: 39078 },
-    { price: 43410, amount: 4.1, total: 177981 },
-  ],
-  asks: [
-    { price: 43460, amount: 1.2, total: 52152 },
-    { price: 43470, amount: 2.8, total: 121716 },
-    { price: 43480, amount: 1.5, total: 65220 },
-    { price: 43490, amount: 3.6, total: 156564 },
-    { price: 43500, amount: 2.0, total: 87000 },
-  ],
-};
-
-// Mock recent trades
-const mockRecentTrades = [
-  { id: 1, time: '14:32:15', price: 43455, amount: 0.125, side: 'buy' },
-  { id: 2, time: '14:32:12', price: 43452, amount: 0.350, side: 'sell' },
-  { id: 3, time: '14:32:08', price: 43458, amount: 0.082, side: 'buy' },
-  { id: 4, time: '14:32:05', price: 43451, amount: 0.215, side: 'buy' },
-  { id: 5, time: '14:32:01', price: 43449, amount: 0.500, side: 'sell' },
-  { id: 6, time: '14:31:58', price: 43455, amount: 0.178, side: 'buy' },
-  { id: 7, time: '14:31:54', price: 43448, amount: 0.420, side: 'sell' },
-  { id: 8, time: '14:31:50', price: 43460, amount: 0.095, side: 'buy' },
-];
-
-// Mock open positions
-const mockOpenPositions = [
-  { id: 1, symbol: 'BTC/USDT', side: 'long', size: 0.5, entryPrice: 43200, markPrice: 43455, pnl: 127.5, pnlPercent: 0.59, leverage: 10 },
-  { id: 2, symbol: 'ETH/USDT', side: 'short', size: 2.0, entryPrice: 2280, markPrice: 2265, pnl: 30.0, pnlPercent: 0.66, leverage: 5 },
-];
-
-// Mock open orders
-const mockOpenOrders = [
-  { id: 1, symbol: 'BTC/USDT', type: 'limit', side: 'buy', price: 43000, amount: 0.25, filled: 0, status: 'open', createdAt: '2024-01-15 14:20:00' },
-  { id: 2, symbol: 'BTC/USDT', type: 'limit', side: 'sell', price: 44000, amount: 0.15, filled: 0, status: 'open', createdAt: '2024-01-15 14:15:00' },
-  { id: 3, symbol: 'BTC/USDT', type: 'stop-limit', side: 'sell', price: 42500, amount: 0.5, filled: 0, status: 'open', createdAt: '2024-01-15 14:10:00' },
-];
-
-// Mock trade history
-const mockTradeHistory = [
-  { id: 1, symbol: 'BTC/USDT', side: 'buy', price: 43200, amount: 0.5, fee: 2.16, total: 21602.16, time: '2024-01-15 13:45:00' },
-  { id: 2, symbol: 'BTC/USDT', side: 'sell', price: 43350, amount: 0.3, fee: 1.30, total: 13003.70, time: '2024-01-15 12:30:00' },
-  { id: 3, symbol: 'BTC/USDT', side: 'buy', price: 43100, amount: 0.8, fee: 3.45, total: 34483.45, time: '2024-01-15 11:15:00' },
-  { id: 4, symbol: 'BTC/USDT', side: 'sell', price: 43500, amount: 0.25, fee: 1.09, total: 10873.91, time: '2024-01-15 10:00:00' },
-  { id: 5, symbol: 'BTC/USDT', side: 'buy', price: 42800, amount: 1.2, fee: 5.14, total: 51365.14, time: '2024-01-14 22:30:00' },
-];
+// Using real-time candle data from Binance WebSocket
 
 const candleData = generateCandleData();
 
-const statusConfig = {
-  running: { label: 'Running', color: 'border-primary/50 text-primary' },
-  paused: { label: 'Paused', color: 'border-accent/50 text-accent' },
-  stopped: { label: 'Stopped', color: 'border-muted/50 text-muted-foreground' },
-  error: { label: 'Error', color: 'border-destructive/50 text-destructive' }
-};
-
-// Custom candlestick component for recharts
-const CandlestickBar = ({ x, y, width, height, payload }: any) => {
-  if (!payload) return null;
-  const { open, close, high, low, isUp } = payload;
-  const color = isUp ? 'hsl(var(--primary))' : 'hsl(var(--destructive))';
-  
-  const bodyHeight = Math.abs(close - open);
-  const wickTop = high;
-  const wickBottom = low;
-  const bodyTop = Math.max(open, close);
-  
-  // Scale calculations
-  const minPrice = Math.min(...candleData.map(d => d.low));
-  const maxPrice = Math.max(...candleData.map(d => d.high));
-  const priceRange = maxPrice - minPrice;
-  const chartHeight = 250;
-  
-  const scaleY = (price: number) => chartHeight - ((price - minPrice) / priceRange) * chartHeight;
-  
-  return (
-    <g>
-      {/* Wick */}
-      <line
-        x1={x + width / 2}
-        y1={scaleY(wickTop)}
-        x2={x + width / 2}
-        y2={scaleY(wickBottom)}
-        stroke={color}
-        strokeWidth={1}
-      />
-      {/* Body */}
-      <rect
-        x={x + 2}
-        y={scaleY(bodyTop)}
-        width={Math.max(width - 4, 2)}
-        height={Math.max((bodyHeight / priceRange) * chartHeight, 2)}
-        fill={isUp ? color : color}
-        stroke={color}
-      />
-    </g>
-  );
+// Bot status configuration - matches backend BotStatus enum (all uppercase)
+// Statuses: RUNNING, PAUSED, ERROR
+const statusConfig: Record<string, { label: string; color: string }> = {
+  RUNNING: { label: 'Running', color: 'border-primary/50 text-primary' },
+  PAUSED: { label: 'Paused', color: 'border-accent/50 text-accent' },
+  ERROR: { label: 'Error', color: 'border-destructive/50 text-destructive' },
 };
 
 export default function BotDetail() {
   const { botId } = useParams();
   const navigate = useNavigate();
   const bots = useAppStore((state) => state.bots);
+  const getBot = useAppStore((state) => state.getBot);
   const updateBot = useAppStore((state) => state.updateBot);
-  
-  const bot = bots.find(b => b.id === botId);
-  
+  const pauseBot = useAppStore((state) => state.pauseBot);
+  const startBot = useAppStore((state) => state.startBot);
+
+  const storeBot = bots.find(b => b.id === botId);
+  const [bot, setBot] = useState(storeBot);
+  const [isLoading, setIsLoading] = useState(!storeBot);
+  const [connections, setConnections] = useState<{ id: string; name: string; is_testnet?: boolean }[]>([]);
+  const [strategies, setStrategies] = useState<{ id: string; name: string; }[]>([]);
+  const [isToggling, setIsToggling] = useState(false);
+
+  // === Open Positions state ===
+  const [positions, setPositions] = useState<any[]>([]);
+  const [positionsLoading, setPositionsLoading] = useState(true);
+  const [positionsTotal, setPositionsTotal] = useState(0);
+  const [positionsLimit] = useState(50);
+  const [positionsOffset, setPositionsOffset] = useState(0);
+
+  // === Open Orders state ===
+  const [orders, setOrders] = useState<any[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersTotal, setOrdersTotal] = useState(0);
+  const [ordersLimit] = useState(50);
+  const [ordersOffset, setOrdersOffset] = useState(0);
+  const [ordersStatusFilter] = useState<string | null>(null);
+
+  // === Trade History state ===
+  const [trades, setTrades] = useState<any[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(true);
+  const [tradesTotal, setTradesTotal] = useState(0);
+  const [tradesLimit] = useState(50);
+  const [tradesOffset, setTradesOffset] = useState(0);
+
+  // === Active tab tracking ===
+  const [activeTab, setActiveTab] = useState('positions');
+
+  // === NEW: Price Explosion Effect State ===
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const [explosions, setExplosions] = useState<{ id: number; y: number }[]>([]);
+  const lastPriceRef = useRef<number | null>(null);
+
+
+
+  // === NEW: Real-time Positions via WebSocket ===
+  const handlePositionsUpdate = useCallback((newPositions: any[]) => {
+    setPositions(newPositions);
+    setPositionsTotal(newPositions.length);
+    setPositionsLoading(false);
+  }, []);
+
+  const { isConnected: positionsConnected } = useBotPositionsWebSocket({
+    botId: botId || '',
+    onPositionsUpdate: handlePositionsUpdate,
+    enabled: !!botId,
+  });
+
+  // === Close Position Logic ===
+  const [closingPosition, setClosingPosition] = useState<string | null>(null);
+  const [closingAll, setClosingAll] = useState(false);
+
+  // Calculate Totals
+  const totalUnrealizedPnl = positions.reduce((sum, p) => sum + (parseFloat(String(p.unrealized_pnl || 0)) || 0), 0);
+  const totalMargin = positions.reduce((sum, p) => sum + ((parseFloat(String(p.entry_price || 0)) * parseFloat(String(p.quantity || 0))) / (parseFloat(String(p.leverage || 1)) || 1)), 0);
+  const totalRoi = totalMargin > 0 ? (totalUnrealizedPnl / totalMargin) * 100 : 0;
+
+  const handleClosePosition = async (symbol: string, side: string) => {
+    if (!bot) return;
+    if (!window.confirm(`Are you sure you want to close ${side} position for ${symbol}?`)) return;
+
+    const key = `${symbol}-${side}`;
+    setClosingPosition(key);
+    try {
+      await apiClient.post(`/api/v1/bots/${bot.id}/positions/close`, {
+        symbol,
+        side
+      });
+      // WebSocket will update the list
+    } catch (error) {
+      console.error('Failed to close position:', error);
+      alert('Failed to close position');
+    } finally {
+      setClosingPosition(null);
+    }
+  };
+
+  const handleCloseAllPositions = async () => {
+    if (!bot) return;
+    if (!window.confirm('Are you sure you want to CLOSE ALL positions? This action cannot be undone.')) return;
+
+    setClosingAll(true);
+    try {
+      await apiClient.post(`/api/v1/bots/${bot.id}/positions/close-all`);
+    } catch (error) {
+      console.error('Failed to close all positions:', error);
+      alert('Failed to close all positions');
+    } finally {
+      setClosingAll(false);
+    }
+  };
+
+  // === Real-time market data (Order Book & Trades) ===
+  const tradingSymbol = bot?.symbol || bot?.configuration?.symbol || 'BTCUSDT';
+
+  // Get is_testnet from bot's Exchange Connection
+  const botConnection = connections.find(c => c.id === bot?.exchange_connection_id);
+  const isTestnet = botConnection?.is_testnet ?? true; // Default testnet for safety
+
+  const { orderBook, recentTrades, isConnected: marketConnected } = useMarketData({
+    symbol: tradingSymbol,
+    enabled: !!tradingSymbol,
+    orderBookLevels: 10,
+    maxTrades: 21,
+    isTestnet: isTestnet,
+  });
+
+  // === Real-time candlestick data ===
+  const { candles, minPrice: candleMinPrice, maxPrice: candleMaxPrice, isConnected: candleConnected } = useCandleData({
+    symbol: tradingSymbol,
+    interval: '1m',
+    maxCandles: 21,
+    enabled: !!tradingSymbol,
+    isTestnet: isTestnet,
+  });
+
+  // Calculate explicit Y-axis range to sync coordinate mapping
+  // Add 10% padding top/bottom
+  const yPadding = (candleMaxPrice - candleMinPrice) * 0.1 || (candleMaxPrice * 0.01);
+  const yAxisMin = candleMinPrice - yPadding;
+  const yAxisMax = candleMaxPrice + yPadding;
+
+  const handleExplosionComplete = useCallback((id: number) => {
+    setExplosions(prev => prev.filter(e => e.id !== id));
+  }, []);
+
+  // Track price changes for explosion effect
+  useEffect(() => {
+    if (candles.length === 0) return;
+    const currentPrice = candles[candles.length - 1].close;
+
+    if (lastPriceRef.current !== null && currentPrice > lastPriceRef.current) {
+      // Price increased! Trigger explosion
+      if (chartContainerRef.current) {
+        const containerHeight = chartContainerRef.current.clientHeight;
+        const range = yAxisMax - yAxisMin;
+        const normalizedPrice = (currentPrice - yAxisMin) / range;
+        const yPixel = containerHeight - (normalizedPrice * containerHeight); // Invert for CSS (top=0)
+
+        // Add new explosion to the list
+        const newExplosion = { id: Date.now(), y: yPixel };
+        setExplosions(prev => [...prev, newExplosion]);
+      }
+    }
+    lastPriceRef.current = currentPrice;
+  }, [candles, yAxisMin, yAxisMax]); // Dependency on candles ensures we check every update
+
+
+
+  useEffect(() => {
+    if (storeBot) {
+      setBot(storeBot);
+      setIsLoading(false);
+    } else if (botId) {
+      setIsLoading(true);
+      getBot(botId)
+        .then((fetchedBot) => {
+          setBot(fetchedBot);
+        })
+        .catch(() => {
+          // Keep bot null
+        })
+        .finally(() => {
+          setIsLoading(false);
+        });
+    }
+  }, [botId, storeBot, getBot]);
+
+  // Load connections and strategies
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [connRes, stratRes] = await Promise.all([
+          apiClient.get('/api/connections'),
+          apiClient.get('/api/v1/strategies')
+        ]);
+        setConnections(connRes.data || []);
+        setStrategies(Array.isArray(stratRes.data) ? stratRes.data : stratRes.data?.strategies || []);
+      } catch (error) {
+        console.error('Failed to load lookup data:', error);
+      }
+    };
+    loadData();
+  }, []);
+
+  // Load positions data (Initial REST fetch)
+  const loadPositions = useCallback(async (showLoading = true) => {
+    if (!botId) return;
+
+    try {
+      if (showLoading) setPositionsLoading(true);
+      const response = await apiClient.get(`/api/v1/bots/${botId}/positions`, {
+        params: { limit: positionsLimit, offset: positionsOffset }
+      });
+
+      if (!response.data || !Array.isArray(response.data.positions)) {
+        setPositions([]);
+        setPositionsTotal(0);
+        return;
+      }
+
+      setPositions(response.data.positions);
+      setPositionsTotal(response.data.total || 0);
+    } catch (error) {
+      console.error('Failed to load positions:', error);
+    } finally {
+      if (showLoading) setPositionsLoading(false);
+    }
+  }, [botId, positionsLimit, positionsOffset]);
+
+  // Initial load
+  useEffect(() => {
+    loadPositions(true);
+  }, [loadPositions]);
+
+  // Load orders data
+  const loadOrders = useCallback(async () => {
+    if (!botId) return;
+
+    try {
+      setOrdersLoading(true);
+      const params: any = { limit: ordersLimit, offset: ordersOffset };
+      if (ordersStatusFilter) {
+        params.status_filter = ordersStatusFilter;
+      }
+
+      const response = await apiClient.get(`/api/v1/bots/${botId}/orders`, { params });
+
+      // ✅ Validate response structure (Pattern 2)
+      if (!response.data || !Array.isArray(response.data.orders)) {
+        console.error('Invalid orders response:', response.data);
+        setOrders([]);
+        setOrdersTotal(0);
+        return;
+      }
+
+      setOrders(response.data.orders);
+      setOrdersTotal(response.data.total || 0);
+    } catch (error) {
+      console.error('Failed to load orders:', error);
+      setOrders([]);
+      setOrdersTotal(0);
+    } finally {
+      setOrdersLoading(false);
+    }
+  }, [botId, ordersLimit, ordersOffset, ordersStatusFilter]);
+
+  // Load trades data
+  const loadTrades = useCallback(async () => {
+    if (!botId) return;
+
+    try {
+      setTradesLoading(true);
+      const response = await apiClient.get(`/api/v1/bots/${botId}/trades`, {
+        params: { limit: tradesLimit, offset: tradesOffset }
+      });
+
+      // ✅ Validate response structure (Pattern 2)
+      if (!response.data || !Array.isArray(response.data.trades)) {
+        console.error('Invalid trades response:', response.data);
+        setTrades([]);
+        setTradesTotal(0);
+        return;
+      }
+
+      setTrades(response.data.trades);
+      setTradesTotal(response.data.total || 0);
+    } catch (error) {
+      console.error('Failed to load trades:', error);
+      setTrades([]);
+      setTradesTotal(0);
+    } finally {
+      setTradesLoading(false);
+    }
+  }, [botId, tradesLimit, tradesOffset]);
+
+  // === NEW: Real-time bot stats via WebSocket ===
+  const [liveStats, setLiveStats] = useState<BotStats | null>(null);
+
+  const handleStatsUpdate = useCallback((stats: BotStats) => {
+    setLiveStats(stats);
+    // Reload all data when a trade closes (stats update received)
+    loadPositions(false); // Don't show loading spinner for smooth update
+    loadOrders();
+    loadTrades();
+  }, [loadPositions, loadOrders, loadTrades]);
+
+  const { stats: wsStats, isConnected } = useBotStatsWebSocket({
+    botId: botId || '',
+    onStatsUpdate: handleStatsUpdate,
+    enabled: !!botId,
+  });
+
+  // Use live stats if available, otherwise fall back to bot data from API
+  const displayStats = liveStats || wsStats
+    ? parseBotStats(liveStats || wsStats)
+    : {
+      // Fallback to bot data from API when WebSocket not available
+      totalPnl: parseFloat(String(bot?.total_profit_loss || bot?.total_pnl || 0)) || 0,
+      winRate: parseFloat(String(bot?.win_rate || 0)) || 0,
+      totalTrades: bot?.total_trades || 0,
+      winningTrades: bot?.winning_trades || 0,
+      losingTrades: bot?.losing_trades || 0,
+      currentWinStreak: bot?.current_win_streak || 0,
+      currentLossStreak: bot?.current_loss_streak || 0,
+      maxWinStreak: bot?.max_win_streak || 0,
+      maxLossStreak: bot?.max_loss_streak || 0,
+    };
+
+  // Load initial data when tab changes
+  const handleTabChange = (value: string) => {
+    setActiveTab(value);
+    if (value === 'positions' && positions.length === 0) {
+      loadPositions();
+    } else if (value === 'orders' && orders.length === 0) {
+      loadOrders();
+    } else if (value === 'history' && trades.length === 0) {
+      loadTrades();
+    }
+  };
+
+  // Load positions, orders, and trades on mount or when botId changes
+  useEffect(() => {
+    if (botId) {
+      if (activeTab === 'positions') loadPositions();
+      // Always load initial orders and trades to get counts
+      loadOrders();
+      loadTrades();
+    }
+  }, [botId, activeTab, loadPositions, loadOrders, loadTrades]);
+
+  // Reload when pagination changes
+  useEffect(() => {
+    if (activeTab === 'positions') loadPositions();
+  }, [positionsOffset, loadPositions, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'orders') loadOrders();
+  }, [ordersOffset, loadOrders, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'history') loadTrades();
+  }, [tradesOffset, loadTrades, activeTab]);
+
+  if (isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="flex items-center justify-center h-[calc(100vh-100px)]">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   if (!bot) {
     return (
       <DashboardLayout>
@@ -176,14 +444,28 @@ export default function BotDetail() {
     );
   }
 
-  const config = statusConfig[bot.status];
-  const isProfit = bot.pnl >= 0;
+  const config = statusConfig[bot.status] || statusConfig.STOPPED || { label: bot.status, color: 'border-muted/50 text-muted-foreground' };
 
-  const handleToggle = () => {
-    if (bot.status === 'running') {
-      updateBot(bot.id, { status: 'paused' });
-    } else {
-      updateBot(bot.id, { status: 'running' });
+  const handleToggle = async () => {
+    if (isToggling) return; // Prevent double-click
+    setIsToggling(true);
+
+    try {
+      if (bot.status === 'RUNNING') {
+        await pauseBot(bot.id);
+      } else {
+        await startBot(bot.id);
+      }
+      // Refetch bot data to ensure state is in sync
+      const refreshedBot = await getBot(bot.id);
+      setBot(refreshedBot);
+    } catch (error: any) {
+      console.error('Failed to toggle bot status:', error);
+      // Show more specific error to user
+      const message = error?.response?.data?.detail || error?.message || 'Unknown error';
+      console.error('Error details:', message);
+    } finally {
+      setIsToggling(false);
     }
   };
 
@@ -201,12 +483,22 @@ export default function BotDetail() {
                 <h1 className="text-2xl font-bold text-foreground">{bot.name}</h1>
                 <Badge variant="outline" className={config.color}>{config.label}</Badge>
               </div>
-              <p className="text-muted-foreground">{bot.symbol} • {bot.exchange} • {bot.strategy}</p>
+              <p className="text-muted-foreground">
+                {bot.symbol || bot.configuration?.symbol} • {connections.find(c => c.id === bot.exchange_connection_id)?.name || 'Unknown Exchange'} • {strategies.find(s => s.id === bot.strategy_id)?.name || 'Unknown Strategy'}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handleToggle} disabled={bot.status === 'error'}>
-              {bot.status === 'running' ? (
+            <Button variant="outline" size="sm" onClick={handleToggle} disabled={bot.status === 'ERROR' || isToggling}>
+              {isToggling ? (
+                <>
+                  <svg className="mr-1 h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  {bot.status === 'RUNNING' ? 'Pausing...' : 'Starting...'}
+                </>
+              ) : bot.status === 'RUNNING' ? (
                 <><Pause className="mr-1 h-4 w-4" /> Pause</>
               ) : (
                 <><Play className="mr-1 h-4 w-4" /> Start</>
@@ -218,210 +510,492 @@ export default function BotDetail() {
           </div>
         </div>
 
-        {/* Summary Stats */}
+        {/* Summary Stats - Uses real-time WebSocket data when available */}
         <div className="grid gap-4 md:grid-cols-4">
-          <Card className="border-border bg-card">
+          <Card className="border-border bg-card relative">
+            {/* WebSocket connection indicator */}
+            <div className="absolute top-2 right-2" title={isConnected ? "Live updates active" : "Connecting..."}>
+              {isConnected ? (
+                <Wifi className="h-3 w-3 text-primary" />
+              ) : (
+                <WifiOff className="h-3 w-3 text-muted-foreground" />
+              )}
+            </div>
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Total P&L</p>
-              <p className={cn("text-2xl font-bold", isProfit ? "text-primary" : "text-destructive")}>
-                {isProfit ? '+' : ''}${bot.pnl.toFixed(2)}
+              <p className={cn("text-2xl font-bold", displayStats.totalPnl >= 0 ? "text-primary" : "text-destructive")}>
+                {displayStats.totalPnl >= 0 ? '+' : ''}${displayStats.totalPnl.toFixed(2)}
               </p>
             </CardContent>
           </Card>
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Win Rate</p>
-              <p className="text-2xl font-bold text-foreground">{bot.winRate.toFixed(1)}%</p>
+              <p className="text-2xl font-bold text-foreground">{displayStats.winRate.toFixed(1)}%</p>
             </CardContent>
           </Card>
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Total Trades</p>
-              <p className="text-2xl font-bold text-foreground">{bot.totalTrades}</p>
+              <p className="text-2xl font-bold text-foreground">
+                {displayStats.totalTrades}
+                <span className="text-sm font-normal text-muted-foreground ml-2">
+                  ({displayStats.winningTrades}W / {displayStats.losingTrades}L)
+                </span>
+              </p>
             </CardContent>
           </Card>
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
-              <p className="text-sm text-muted-foreground">P&L %</p>
-              <p className={cn("text-2xl font-bold", bot.pnlPercent >= 0 ? "text-primary" : "text-destructive")}>
-                {bot.pnlPercent >= 0 ? '+' : ''}{bot.pnlPercent.toFixed(2)}%
+              <p className="text-sm text-muted-foreground">Streak</p>
+              <p className="text-2xl font-bold text-foreground">
+                {displayStats.currentWinStreak > 0 && (
+                  <span className="text-primary">🔥 {displayStats.currentWinStreak}W</span>
+                )}
+                {displayStats.currentLossStreak > 0 && (
+                  <span className="text-destructive">❄️ {displayStats.currentLossStreak}L</span>
+                )}
+                {displayStats.currentWinStreak === 0 && displayStats.currentLossStreak === 0 && (
+                  <span className="text-muted-foreground">-</span>
+                )}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Best: {displayStats.maxWinStreak}W | Worst: {displayStats.maxLossStreak}L
               </p>
             </CardContent>
           </Card>
         </div>
 
         {/* Charts Row */}
-        <div className="grid gap-4 lg:grid-cols-3">
-          {/* Candlestick Chart */}
-          <Card className="border-border bg-card lg:col-span-2">
+        <div className="flex flex-col lg:flex-row gap-4">
+          {/* Candlestick Chart - Flex 10 (5 parts) */}
+          <Card className="border-none bg-transparent shadow-none w-full lg:flex-[10] lg:w-auto flex flex-col min-w-0">
             <CardHeader className="pb-2">
-              <CardTitle className="text-lg">Price Chart</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">Price Chart</CardTitle>
+                {candleConnected && (
+                  <span className="flex items-center gap-1 text-xs text-primary">
+                    <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                    Live
+                  </span>
+                )}
+              </div>
             </CardHeader>
-            <CardContent>
-              <div className="h-[300px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={candleData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                    <XAxis 
-                      dataKey="time" 
-                      axisLine={false} 
-                      tickLine={false}
-                      tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
-                      interval={9}
-                    />
-                    <YAxis 
-                      domain={['dataMin - 100', 'dataMax + 100']}
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
-                      orientation="right"
-                      tickFormatter={(v) => v.toLocaleString()}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: 'hsl(var(--card))',
-                        border: '1px solid hsl(var(--border))',
-                        borderRadius: '8px',
-                      }}
-                      labelStyle={{ color: 'hsl(var(--foreground))' }}
-                      formatter={(value: any, name: string) => [
-                        typeof value === 'number' ? value.toFixed(2) : value,
-                        name.charAt(0).toUpperCase() + name.slice(1)
-                      ]}
-                    />
-                    <Bar dataKey="close" shape={<CandlestickBar />}>
-                      {candleData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.isUp ? 'hsl(var(--primary))' : 'hsl(var(--destructive))'} />
-                      ))}
-                    </Bar>
-                  </ComposedChart>
-                </ResponsiveContainer>
+            <CardContent className="p-0 flex-1 relative min-h-[450px]" ref={chartContainerRef}>
+
+              {/* Explosion Effect Overlay */}
+              {/* Multiple Price Explosions */}
+              {explosions.map(exp => (
+                <PriceExplosion
+                  key={exp.id}
+                  x={0} // x is handled by CSS right positioning
+                  y={exp.y}
+                  active={true}
+                  onComplete={() => handleExplosionComplete(exp.id)}
+                />
+              ))}
+
+              <div className="absolute inset-0">
+                <Plot
+                  data={[
+                    {
+                      x: candles.map(c => c.timeStr),
+                      open: candles.map(c => c.open),
+                      high: candles.map(c => c.high),
+                      low: candles.map(c => c.low),
+                      close: candles.map(c => c.close),
+                      type: 'candlestick',
+                      increasing: {
+                        line: { color: '#15FF00', width: 1 },
+                        fillcolor: '#15FF00'
+                      },
+                      decreasing: {
+                        line: { color: '#FF1E1E', width: 1 },
+                        fillcolor: '#FF1E1E'
+                      },
+                    } as any,
+                  ]}
+                  layout={{
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    showlegend: false,
+                    dragmode: false, // Disable drag interactions
+                    xaxis: {
+                      visible: false,
+                      rangeslider: { visible: false },
+                      fixedrange: true, // Disable X zoom
+                    },
+                    yaxis: {
+                      visible: false,
+                      fixedrange: true, // Disable Y zoom
+                      range: [yAxisMin, yAxisMax], // Explicit range for sync
+                    },
+                    margin: { t: 0, r: 100, l: 0, b: 0 },
+                    autosize: true,
+                    annotations: candles.length > 0 ? [
+                      {
+                        xref: 'paper',
+                        yref: 'y',
+                        x: 1,
+                        y: candles[candles.length - 1].close,
+                        xanchor: 'left',
+                        text: candles[candles.length - 1].close.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }),
+                        showarrow: false,
+                        font: {
+                          family: 'monospace',
+                          size: 18,
+                          color: '#15FF00',
+                          weight: 700
+                        },
+                        yshift: 0
+                      }
+                    ] : [],
+                    shapes: candleMinPrice > 0 ? [
+                      {
+                        type: 'line',
+                        xref: 'paper',
+                        yref: 'y',
+                        x0: 0,
+                        y0: candleMinPrice,
+                        x1: 1,
+                        y1: candleMinPrice,
+                        line: {
+                          color: '#FF1E1E',
+                          width: 1,
+                          dash: 'dash'
+                        },
+                        opacity: 0.5
+                      }
+                    ] : []
+                  }}
+                  useResizeHandler={true}
+                  style={{ width: '100%', height: '100%' }}
+                  config={{
+                    displayModeBar: false,
+                    scrollZoom: false,
+                    doubleClick: false,
+                    showTips: false,
+                    editable: false,
+                  }}
+                />
               </div>
             </CardContent>
           </Card>
 
-          {/* Order Depth & Recent Trades */}
-          <div className="space-y-4">
-            {/* Order Depth */}
-            <Card className="border-border bg-card">
-              <CardHeader className="pb-2">
+          {/* Order Depth with Depth Bars - Flex 3 (1.5 parts) */}
+          <Card className="border-border bg-card w-full lg:flex-[3] lg:w-auto min-w-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
                 <CardTitle className="text-lg">Order Depth</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="max-h-[180px] overflow-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="border-border hover:bg-transparent">
-                        <TableHead className="h-8 text-xs">Price</TableHead>
-                        <TableHead className="h-8 text-right text-xs">Amount</TableHead>
-                        <TableHead className="h-8 text-right text-xs">Total</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {mockOrderDepth.asks.slice().reverse().map((ask, i) => (
-                        <TableRow key={`ask-${i}`} className="border-0 hover:bg-muted/30">
-                          <TableCell className="py-1 font-mono text-xs text-destructive">{ask.price.toLocaleString()}</TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs">{ask.amount}</TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs text-muted-foreground">{ask.total.toLocaleString()}</TableCell>
-                        </TableRow>
-                      ))}
-                      <TableRow className="border-y border-border bg-muted/20">
-                        <TableCell colSpan={3} className="py-1 text-center font-mono text-sm font-semibold text-foreground">
-                          43,455.00
-                        </TableCell>
-                      </TableRow>
-                      {mockOrderDepth.bids.map((bid, i) => (
-                        <TableRow key={`bid-${i}`} className="border-0 hover:bg-muted/30">
-                          <TableCell className="py-1 font-mono text-xs text-primary">{bid.price.toLocaleString()}</TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs">{bid.amount}</TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs text-muted-foreground">{bid.total.toLocaleString()}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                <div className="flex items-center gap-2">
+                  {marketConnected && (
+                    <span className="flex items-center gap-1 text-xs text-primary">
+                      <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                      Live
+                    </span>
+                  )}
                 </div>
-              </CardContent>
-            </Card>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="divide-y divide-border/30">
+                {/* Header */}
+                <div className="grid grid-cols-3 px-4 py-2 text-xs text-muted-foreground">
+                  <span>Price</span>
+                  <span className="text-right">Size</span>
+                  <span className="text-right">Total</span>
+                </div>
 
-            {/* Recent Trades */}
-            <Card className="border-border bg-card">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-lg">Recent Trades</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="max-h-[180px] overflow-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="border-border hover:bg-transparent">
-                        <TableHead className="h-8 text-xs">Time</TableHead>
-                        <TableHead className="h-8 text-right text-xs">Price</TableHead>
-                        <TableHead className="h-8 text-right text-xs">Amount</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {mockRecentTrades.map((trade) => (
-                        <TableRow key={trade.id} className="border-0 hover:bg-muted/30">
-                          <TableCell className="py-1 font-mono text-xs text-muted-foreground">{trade.time}</TableCell>
-                          <TableCell className={cn("py-1 text-right font-mono text-xs", trade.side === 'buy' ? "text-primary" : "text-destructive")}>
-                            {trade.price.toLocaleString()}
-                          </TableCell>
-                          <TableCell className="py-1 text-right font-mono text-xs">{trade.amount}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                {/* Asks (sells) - reversed so highest is at top */}
+                {orderBook.asks.slice().reverse().map((ask, i) => {
+                  const depthPercent = (ask.amount / (orderBook.maxAskAmount || 0.001)) * 100;
+                  // Intensity: higher volume = more opaque (0.1 to 0.5)
+                  const intensity = 0.1 + (ask.amount / (orderBook.maxAskAmount || 0.001)) * 0.4;
+                  // Flash intensity based on change magnitude
+                  const hasChange = ask.change && Math.abs(ask.change) > 0.0001;
+                  const flashIntensity = hasChange ? Math.min(Math.abs(ask.change) / (orderBook.maxAskAmount || 0.001), 1) : 0;
+
+                  return (
+                    <div
+                      key={`ask-${ask.price}`}
+                      className="relative grid grid-cols-3 px-4 py-1.5 transition-all duration-150"
+                      style={{
+                        // Flash background on change
+                        boxShadow: flashIntensity > 0
+                          ? `inset 0 0 0 100px rgba(239, 68, 68, ${flashIntensity * 0.3})`
+                          : undefined,
+                      }}
+                    >
+                      {/* Depth bar background with intensity */}
+                      <div
+                        className="absolute inset-y-0 right-0 transition-all duration-300 ease-out"
+                        style={{
+                          width: `${depthPercent}%`,
+                          backgroundColor: `rgba(239, 68, 68, ${intensity})`,
+                        }}
+                      />
+                      {/* Content */}
+                      <span className="relative font-mono text-xs text-destructive">{ask.price.toLocaleString()}</span>
+                      <span className="relative text-right font-mono text-xs">{ask.amount.toFixed(4)}</span>
+                      <span className="relative text-right font-mono text-xs text-muted-foreground">{ask.total.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                  );
+                })}
+
+                {/* Spread indicator */}
+                <div className="px-4 py-2 text-center bg-muted/30">
+                  <span className="font-mono text-sm font-bold text-foreground">
+                    {orderBook.lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                  {orderBook.asks[0] && orderBook.bids[0] && (
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      Spread: {(orderBook.asks[0].price - orderBook.bids[0].price).toFixed(2)}
+                    </span>
+                  )}
                 </div>
-              </CardContent>
-            </Card>
-          </div>
+
+                {/* Bids (buys) */}
+                {orderBook.bids.map((bid, i) => {
+                  const depthPercent = (bid.amount / (orderBook.maxBidAmount || 0.001)) * 100;
+                  // Intensity: higher volume = more opaque (0.1 to 0.5)
+                  const intensity = 0.1 + (bid.amount / (orderBook.maxBidAmount || 0.001)) * 0.4;
+                  // Flash intensity based on change magnitude
+                  const hasChange = bid.change && Math.abs(bid.change) > 0.0001;
+                  const flashIntensity = hasChange ? Math.min(Math.abs(bid.change) / (orderBook.maxBidAmount || 0.001), 1) : 0;
+
+                  return (
+                    <div
+                      key={`bid-${bid.price}`}
+                      className="relative grid grid-cols-3 px-4 py-1.5 transition-all duration-150"
+                      style={{
+                        // Flash background on change
+                        boxShadow: flashIntensity > 0
+                          ? `inset 0 0 0 100px rgba(34, 197, 94, ${flashIntensity * 0.3})`
+                          : undefined,
+                      }}
+                    >
+                      {/* Depth bar background with intensity */}
+                      <div
+                        className="absolute inset-y-0 right-0 transition-all duration-300 ease-out"
+                        style={{
+                          width: `${depthPercent}%`,
+                          backgroundColor: `rgba(34, 197, 94, ${intensity})`,
+                        }}
+                      />
+                      {/* Content */}
+                      <span className="relative font-mono text-xs text-primary">{bid.price.toLocaleString()}</span>
+                      <span className="relative text-right font-mono text-xs">{bid.amount.toFixed(4)}</span>
+                      <span className="relative text-right font-mono text-xs text-muted-foreground">{bid.total.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Recent Trades with Flash Animation - Flex 3 (1.5 parts) */}
+          <Card className="border-border bg-card w-full lg:flex-[3] lg:w-auto min-w-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">Recent Trades</CardTitle>
+                {marketConnected && (
+                  <span className="flex items-center gap-1 text-xs text-primary">
+                    <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                    Live
+                  </span>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="divide-y divide-border/30">
+                {/* Header */}
+                <div className="grid grid-cols-3 px-4 py-2 text-xs text-muted-foreground">
+                  <span>Time</span>
+                  <span className="text-right">Price</span>
+                  <span className="text-right">Size</span>
+                </div>
+
+                {recentTrades.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+                    Waiting for trades...
+                  </div>
+                ) : (
+                  recentTrades.map((trade, i) => (
+                    <div
+                      key={trade.id}
+                      className={cn(
+                        "grid grid-cols-3 px-4 py-1.5 transition-all duration-500",
+                        i === 0 && "animate-flash-trade"
+                      )}
+                      style={{
+                        backgroundColor: i === 0
+                          ? (trade.side === 'buy' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)')
+                          : undefined
+                      }}
+                    >
+                      <span className="font-mono text-xs text-muted-foreground">{trade.time}</span>
+                      <span className={cn(
+                        "text-right font-mono text-xs font-medium",
+                        trade.side === 'buy' ? "text-primary" : "text-destructive"
+                      )}>
+                        {trade.price.toLocaleString()}
+                      </span>
+                      <span className="text-right font-mono text-xs">{trade.amount.toFixed(4)}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
         </div>
 
         {/* Tables Section */}
-        <Tabs defaultValue="positions" className="w-full">
+        <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
           <TabsList className="bg-muted/50">
-            <TabsTrigger value="positions">Open Positions ({mockOpenPositions.length})</TabsTrigger>
-            <TabsTrigger value="orders">Open Orders ({mockOpenOrders.length})</TabsTrigger>
-            <TabsTrigger value="history">Trade History</TabsTrigger>
+            <TabsTrigger value="positions">Open Positions ({positionsTotal})</TabsTrigger>
+            <TabsTrigger value="orders">Open Orders ({ordersTotal})</TabsTrigger>
+            <TabsTrigger value="history">Trade History ({tradesTotal})</TabsTrigger>
           </TabsList>
 
+
+
           <TabsContent value="positions" className="mt-4">
+
+            {/* Total PnL Summary */}
+
+
             <Card className="border-border bg-card">
               <CardContent className="p-0">
                 <Table>
                   <TableHeader>
                     <TableRow className="border-border hover:bg-transparent">
-                      <TableHead>Symbol</TableHead>
-                      <TableHead>Side</TableHead>
-                      <TableHead className="text-right">Size</TableHead>
-                      <TableHead className="text-right">Entry Price</TableHead>
-                      <TableHead className="text-right">Mark Price</TableHead>
-                      <TableHead className="text-right">P&L</TableHead>
-                      <TableHead className="text-right">Leverage</TableHead>
+                      <TableHead className="w-[100px]">Symbol</TableHead>
+                      <TableHead className="w-[80px]">Side</TableHead>
+                      <TableHead className="text-right w-[100px]">Size</TableHead>
+                      <TableHead className="text-right w-[120px]">Entry Price</TableHead>
+                      <TableHead className="text-right w-[120px]">Mark Price</TableHead>
+                      <TableHead className="text-right w-[160px]">P&L</TableHead>
+                      <TableHead className="text-right w-[100px]">Leverage</TableHead>
+                      <TableHead className="text-right w-[100px]">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {mockOpenPositions.map((pos) => (
-                      <TableRow key={pos.id} className="border-border">
-                        <TableCell className="font-medium">{pos.symbol}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={pos.side === 'long' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
-                            {pos.side.toUpperCase()}
-                          </Badge>
+                    {positionsLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center py-8">
+                          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto"></div>
                         </TableCell>
-                        <TableCell className="text-right font-mono">{pos.size}</TableCell>
-                        <TableCell className="text-right font-mono">${pos.entryPrice.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono">${pos.markPrice.toLocaleString()}</TableCell>
-                        <TableCell className={cn("text-right font-mono", pos.pnl >= 0 ? "text-primary" : "text-destructive")}>
-                          <div className="flex items-center justify-end gap-1">
-                            {pos.pnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-                            ${Math.abs(pos.pnl).toFixed(2)} ({pos.pnlPercent}%)
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right font-mono">{pos.leverage}x</TableCell>
                       </TableRow>
-                    ))}
+                    ) : positions.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                          No open positions
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      <>
+                        {positions.map((pos) => {
+                          // Parse values from WebSocket/REST (support both field names)
+                          const quantity = parseFloat(String(pos.quantity || 0));
+                          const entryPrice = parseFloat(String(pos.entry_price || 0));
+                          // WebSocket sends mark_price, REST sends current_price
+                          const currentPrice = parseFloat(String(pos.mark_price || pos.current_price || 0));
+                          const unrealizedPnl = parseFloat(String(pos.unrealized_pnl || 0));
+                          const unrealizedPnlPct = parseFloat(String(pos.unrealized_pnl_pct || 0));
+
+                          return (
+                            <TableRow key={pos.id} className="border-border">
+                              <TableCell className="font-medium">{pos.symbol}</TableCell>
+                              <TableCell>
+                                <Badge variant="outline" className={pos.side === 'LONG' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
+                                  {pos.side}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">{quantity.toFixed(4)}</TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">${entryPrice.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">
+                                <FlashPrice
+                                  value={currentPrice}
+                                  prefix="$"
+                                  formatter={(v) => v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                />
+                              </TableCell>
+                              <TableCell className={cn("text-right font-mono tabular-nums", unrealizedPnl >= 0 ? "text-primary" : "text-destructive")}>
+                                <div className="flex items-center justify-end gap-1">
+                                  {unrealizedPnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                                  ${Math.abs(unrealizedPnl).toFixed(2)} ({unrealizedPnlPct.toFixed(2)}%)
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right font-mono tabular-nums">
+                                <div className="flex flex-col items-end">
+                                  <span>{pos.leverage || 1}x</span>
+                                  <span className="text-xs text-muted-foreground capitalize">{pos.margin_type || 'Cross'}</span>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 w-8 p-0 text-muted-foreground hover:text-green-500"
+                                  onClick={() => handleClosePosition(pos.symbol, pos.side)}
+                                  disabled={closingPosition === `${pos.symbol}-${pos.side}` || closingAll}
+                                >
+                                  {closingPosition === `${pos.symbol}-${pos.side}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <CircleDollarSign className="h-5 w-5" />}
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                        <TableRow className="hover:bg-transparent border-t-[1px] border-border bg-muted/10 font-bold">
+                          <TableCell colSpan={5} className="text-right py-4">Total Unrealized PnL</TableCell>
+                          <TableCell className={cn("text-right font-mono tabular-nums py-4", totalUnrealizedPnl >= 0 ? "text-green-500" : "text-red-500")}>
+                            ${totalUnrealizedPnl.toFixed(2)} ({totalRoi.toFixed(2)}%)
+                          </TableCell>
+                          <TableCell className="py-4"></TableCell>
+                          <TableCell className="text-right py-4">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 w-8 p-0 border-green-500/50 text-green-500 hover:bg-green-500/10 hover:text-green-600"
+                              onClick={handleCloseAllPositions}
+                              disabled={closingAll}
+                              title="Close All Positions (Take Profit)"
+                            >
+                              {closingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Coins className="h-4 w-4" />}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      </>
+                    )}
                   </TableBody>
                 </Table>
               </CardContent>
+              {/* Pagination for Positions */}
+              {!positionsLoading && positions.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                  <div className="text-sm text-muted-foreground">
+                    Showing {positionsOffset + 1}-{Math.min(positionsOffset + positionsLimit, positionsTotal)} of {positionsTotal}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={positionsOffset === 0}
+                      onClick={() => setPositionsOffset(Math.max(0, positionsOffset - positionsLimit))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={positionsOffset + positionsLimit >= positionsTotal}
+                      onClick={() => setPositionsOffset(positionsOffset + positionsLimit)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </Card>
           </TabsContent>
 
@@ -442,27 +1016,78 @@ export default function BotDetail() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {mockOpenOrders.map((order) => (
-                      <TableRow key={order.id} className="border-border">
-                        <TableCell className="font-medium">{order.symbol}</TableCell>
-                        <TableCell className="capitalize">{order.type}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={order.side === 'buy' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
-                            {order.side.toUpperCase()}
-                          </Badge>
+                    {ordersLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center py-8">
+                          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto"></div>
                         </TableCell>
-                        <TableCell className="text-right font-mono">${order.price.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono">{order.amount}</TableCell>
-                        <TableCell className="text-right font-mono">{order.filled}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="border-accent/50 text-accent">{order.status}</Badge>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">{order.createdAt}</TableCell>
                       </TableRow>
-                    ))}
+                    ) : orders.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                          No open orders
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      orders.map((order) => {
+                        // ✅ SAFE: Parse Decimal strings (Pattern 15)
+                        const quantity = parseFloat(String(order.quantity || 0));
+                        const price = order.price != null ? parseFloat(String(order.price)) : null;
+                        const filledQty = parseFloat(String(order.filled_quantity || 0));
+
+                        return (
+                          <TableRow key={order.id} className="border-border">
+                            <TableCell className="font-medium">{order.symbol}</TableCell>
+                            <TableCell className="capitalize">{order.type}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className={order.side === 'BUY' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
+                                {order.side}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right font-mono">
+                              {price != null ? `$${price.toLocaleString()}` : 'Market'}
+                            </TableCell>
+                            <TableCell className="text-right font-mono">{quantity.toFixed(4)}</TableCell>
+                            <TableCell className="text-right font-mono">{filledQty.toFixed(4)}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="border-accent/50 text-accent">{order.status}</Badge>
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {new Date(order.created_at).toLocaleString()}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
                   </TableBody>
                 </Table>
               </CardContent>
+              {/* Pagination for Orders */}
+              {!ordersLoading && orders.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                  <div className="text-sm text-muted-foreground">
+                    Showing {ordersOffset + 1}-{Math.min(ordersOffset + ordersLimit, ordersTotal)} of {ordersTotal}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={ordersOffset === 0}
+                      onClick={() => setOrdersOffset(Math.max(0, ordersOffset - ordersLimit))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={ordersOffset + ordersLimit >= ordersTotal}
+                      onClick={() => setOrdersOffset(ordersOffset + ordersLimit)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </Card>
           </TabsContent>
 
@@ -478,28 +1103,86 @@ export default function BotDetail() {
                       <TableHead className="text-right">Amount</TableHead>
                       <TableHead className="text-right">Fee</TableHead>
                       <TableHead className="text-right">Total</TableHead>
+                      <TableHead className="text-right">Realized P&L</TableHead>
                       <TableHead>Time</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {mockTradeHistory.map((trade) => (
-                      <TableRow key={trade.id} className="border-border">
-                        <TableCell className="font-medium">{trade.symbol}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={trade.side === 'buy' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
-                            {trade.side.toUpperCase()}
-                          </Badge>
+                    {tradesLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center py-8">
+                          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto"></div>
                         </TableCell>
-                        <TableCell className="text-right font-mono">${trade.price.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono">{trade.amount}</TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground">${trade.fee}</TableCell>
-                        <TableCell className="text-right font-mono">${trade.total.toLocaleString()}</TableCell>
-                        <TableCell className="text-muted-foreground">{trade.time}</TableCell>
                       </TableRow>
-                    ))}
+                    ) : trades.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                          No trade history
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      trades.map((trade) => {
+                        // ✅ SAFE: Parse Decimal strings (Pattern 15)
+                        const quantity = parseFloat(String(trade.quantity || 0));
+                        const price = parseFloat(String(trade.price || 0));
+                        const fee = parseFloat(String(trade.fee || 0));
+                        const total = (price * quantity) + fee;
+                        const realizedPnl = parseFloat(String(trade.realized_pnl || 0));
+
+                        return (
+                          <TableRow key={trade.id} className="border-border">
+                            <TableCell className="font-medium">{trade.symbol}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className={trade.side === 'BUY' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}>
+                                {trade.side}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right font-mono">${price.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono">{quantity.toFixed(4)}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">${fee.toFixed(2)}</TableCell>
+                            <TableCell className="text-right font-mono">${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                            <TableCell className={cn("text-right font-mono tabular-nums", realizedPnl >= 0 ? "text-primary" : "text-destructive")}>
+                              <div className="flex items-center justify-end gap-1">
+                                {realizedPnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                                ${Math.abs(realizedPnl).toFixed(2)}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {new Date(trade.created_at).toLocaleString()}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
                   </TableBody>
                 </Table>
               </CardContent>
+              {/* Pagination for Trade History */}
+              {!tradesLoading && trades.length > 0 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                  <div className="text-sm text-muted-foreground">
+                    Showing {tradesOffset + 1}-{Math.min(tradesOffset + tradesLimit, tradesTotal)} of {tradesTotal}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={tradesOffset === 0}
+                      onClick={() => setTradesOffset(Math.max(0, tradesOffset - tradesLimit))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={tradesOffset + tradesLimit >= tradesTotal}
+                      onClick={() => setTradesOffset(tradesOffset + tradesLimit)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </Card>
           </TabsContent>
         </Tabs>

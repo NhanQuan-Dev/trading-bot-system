@@ -212,6 +212,10 @@ class BacktestRun:
     strategy_id: Optional[UUID] = None
     strategy_name: Optional[str] = None
     
+    # Exchange connection - required for multi-exchange support
+    exchange_connection_id: Optional[UUID] = None
+    exchange_name: Optional[str] = None  # Loaded from relationship
+    
     # Timeframe
     symbol: str = ""
     start_date: datetime = field(default_factory=datetime.utcnow)
@@ -220,10 +224,12 @@ class BacktestRun:
     
     # Configuration
     config: BacktestConfig = field(default_factory=BacktestConfig)
+
     
     # State
     status: BacktestStatus = BacktestStatus.PENDING
     progress_percent: Decimal = Decimal("0")
+    status_message: Optional[str] = None  # NEW: User-friendly progress message
     
     # Timestamps
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -235,6 +241,11 @@ class BacktestRun:
     total_trades: Optional[int] = None
     win_rate: Optional[Decimal] = None
     total_return: Optional[Decimal] = None
+    
+    # Performance Metrics (loaded from results)
+    profit_factor: Optional[Decimal] = None
+    max_drawdown: Optional[Decimal] = None
+    sharpe_ratio: Optional[Decimal] = None
     
     # Detailed Results (loaded on demand)
     results: Optional[BacktestResults] = None
@@ -274,6 +285,7 @@ class BacktestRun:
         self._current_equity = self.config.initial_capital
         self._current_positions = {}
         self._open_trades = []
+        self.status_message = "Starting backtest..."
     
     def complete(self, results: BacktestResults):
         """Complete the backtest with results."""
@@ -284,12 +296,14 @@ class BacktestRun:
         self.completed_at = datetime.utcnow()
         self.results = results
         self.progress_percent = Decimal("100")
+        self.status_message = "Backtest completed"
     
     def fail(self, error: str):
         """Mark backtest as failed."""
         self.status = BacktestStatus.FAILED
         self.completed_at = datetime.utcnow()
         self.error_message = error
+        self.status_message = f"Failed: {error[:100]}" if len(error) > 100 else f"Failed: {error}"
     
     def cancel(self):
         """Cancel the backtest."""
@@ -298,10 +312,13 @@ class BacktestRun:
         
         self.status = BacktestStatus.CANCELLED
         self.completed_at = datetime.utcnow()
+        self.status_message = "Backtest cancelled"
     
-    def update_progress(self, percent: Decimal):
-        """Update backtest progress."""
+    def update_progress(self, percent: Decimal, message: Optional[str] = None):
+        """Update backtest progress with optional status message."""
         self.progress_percent = max(Decimal("0"), min(percent, Decimal("100")))
+        if message:
+            self.status_message = message
     
     @property
     def is_running(self) -> bool:

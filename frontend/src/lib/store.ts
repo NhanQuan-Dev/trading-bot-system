@@ -76,39 +76,7 @@ interface AppState {
 
 // Mock data removed - using real API
 
-const mockConnections: Connection[] = [
-  {
-    id: '1',
-    name: 'Binance Main',
-    exchange: 'Binance',
-    type: 'live',
-    status: 'connected',
-    lastSync: new Date().toISOString()
-  },
-  {
-    id: '2',
-    name: 'Bybit Trading',
-    exchange: 'Bybit',
-    type: 'live',
-    status: 'connected',
-    lastSync: new Date().toISOString()
-  },
-  {
-    id: '3',
-    name: 'Binance Testnet',
-    exchange: 'Binance',
-    type: 'testnet',
-    status: 'disconnected',
-    lastSync: new Date(Date.now() - 86400000).toISOString()
-  }
-];
-
-const mockTrades: Trade[] = [
-  { id: '1', botId: '1', symbol: 'BTC/USDT', side: 'buy', price: 67500, quantity: 0.05, pnl: 125.50, timestamp: new Date().toISOString(), status: 'closed' },
-  { id: '2', botId: '1', symbol: 'BTC/USDT', side: 'sell', price: 68200, quantity: 0.05, pnl: 89.20, timestamp: new Date(Date.now() - 3600000).toISOString(), status: 'closed' },
-  { id: '3', botId: '2', symbol: 'ETH/USDT', side: 'buy', price: 3450, quantity: 0.5, pnl: 45.30, timestamp: new Date(Date.now() - 7200000).toISOString(), status: 'closed' },
-  { id: '4', botId: '1', symbol: 'BTC/USDT', side: 'buy', price: 67800, quantity: 0.03, pnl: 0, timestamp: new Date().toISOString(), status: 'open' },
-];
+// Mock data removed
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -263,9 +231,16 @@ export const useAppStore = create<AppState>()(
       startBot: async (id: string) => {
         try {
           const updatedBot = await botsApi.start(id);
-          set((state) => ({
-            bots: state.bots.map(b => b.id === id ? updatedBot : b)
-          }));
+          // Only update state if we got a valid bot back
+          if (updatedBot && updatedBot.id) {
+            set((state) => ({
+              bots: state.bots.map(b => b.id === id ? updatedBot : b)
+            }));
+          } else {
+            console.error('startBot: Invalid response - bot data missing');
+            const bots = await botsApi.list();
+            set({ bots });
+          }
         } catch (error) {
           console.error('Failed to start bot:', error);
           throw error;
@@ -275,9 +250,16 @@ export const useAppStore = create<AppState>()(
       stopBot: async (id: string) => {
         try {
           const updatedBot = await botsApi.stop(id);
-          set((state) => ({
-            bots: state.bots.map(b => b.id === id ? updatedBot : b)
-          }));
+          // Only update state if we got a valid bot back
+          if (updatedBot && updatedBot.id) {
+            set((state) => ({
+              bots: state.bots.map(b => b.id === id ? updatedBot : b)
+            }));
+          } else {
+            console.error('stopBot: Invalid response - bot data missing');
+            const bots = await botsApi.list();
+            set({ bots });
+          }
         } catch (error) {
           console.error('Failed to stop bot:', error);
           throw error;
@@ -287,9 +269,17 @@ export const useAppStore = create<AppState>()(
       pauseBot: async (id: string) => {
         try {
           const updatedBot = await botsApi.pause(id);
-          set((state) => ({
-            bots: state.bots.map(b => b.id === id ? updatedBot : b)
-          }));
+          // Only update state if we got a valid bot back
+          if (updatedBot && updatedBot.id) {
+            set((state) => ({
+              bots: state.bots.map(b => b.id === id ? updatedBot : b)
+            }));
+          } else {
+            console.error('pauseBot: Invalid response - bot data missing');
+            // Refetch bots to ensure consistent state
+            const bots = await botsApi.list();
+            set({ bots });
+          }
         } catch (error) {
           console.error('Failed to pause bot:', error);
           throw error;
@@ -359,12 +349,12 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      trades: mockTrades,
+      trades: [],
       addTrade: (trade) => set((state) => ({ trades: [...state.trades, trade] })),
 
-      totalBalance: 24850.75,
-      dailyPnl: 1969.55,
-      totalExposure: 3250.00
+      totalBalance: 0,
+      dailyPnl: 0,
+      totalExposure: 0
     }),
     {
       name: 'trading-dashboard-storage',

@@ -116,6 +116,7 @@ class Order:
     id: uuid.UUID
     user_id: uuid.UUID
     exchange_connection_id: uuid.UUID
+    exchange_id: int  # Added to map to DB
     symbol: str
     side: OrderSide
     order_type: OrderType
@@ -126,6 +127,7 @@ class Order:
     
     # Optional fields (with defaults)
     bot_id: Optional[uuid.UUID] = None
+    position_id: Optional[uuid.UUID] = None  # Link to parent position
     price: Optional[OrderPrice] = None
     stop_price: Optional[OrderPrice] = None
     callback_rate: Optional[Decimal] = None  # For trailing stop
@@ -247,7 +249,7 @@ class Order:
         reduce_only: bool = False,
         leverage: int = 1,
     ) -> "Order":
-        """Create a stop market order."""
+        """Create a stop market order (stop loss - sells at market when price hits stop)."""
         now = dt.now(dt_timezone.utc)
         return cls(
             id=uuid.uuid4(),
@@ -259,6 +261,184 @@ class Order:
             order_type=OrderType.STOP_MARKET,
             quantity=OrderQuantity(quantity),
             stop_price=OrderPrice(stop_price),
+            position_side=position_side,
+            working_type=working_type,
+            reduce_only=reduce_only,
+            leverage=leverage,
+            status=OrderStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+    
+    @classmethod
+    def create_stop_limit_order(
+        cls,
+        user_id: uuid.UUID,
+        exchange_connection_id: uuid.UUID,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Decimal,
+        stop_price: Decimal,
+        bot_id: Optional[uuid.UUID] = None,
+        position_side: PositionSide = PositionSide.BOTH,
+        time_in_force: TimeInForce = TimeInForce.GTC,
+        working_type: WorkingType = WorkingType.CONTRACT_PRICE,
+        reduce_only: bool = False,
+        leverage: int = 1,
+    ) -> "Order":
+        """
+        Create a stop limit order.
+        
+        When price hits stop_price, places a limit order at price.
+        Used for stop loss with price control.
+        """
+        now = dt.now(dt_timezone.utc)
+        return cls(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            bot_id=bot_id,
+            exchange_connection_id=exchange_connection_id,
+            symbol=symbol,
+            side=side,
+            order_type=OrderType.STOP,
+            quantity=OrderQuantity(quantity),
+            price=OrderPrice(price),
+            stop_price=OrderPrice(stop_price),
+            time_in_force=time_in_force,
+            position_side=position_side,
+            working_type=working_type,
+            reduce_only=reduce_only,
+            leverage=leverage,
+            status=OrderStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+    
+    @classmethod
+    def create_take_profit_market_order(
+        cls,
+        user_id: uuid.UUID,
+        exchange_connection_id: uuid.UUID,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        stop_price: Decimal,
+        bot_id: Optional[uuid.UUID] = None,
+        position_side: PositionSide = PositionSide.BOTH,
+        working_type: WorkingType = WorkingType.CONTRACT_PRICE,
+        reduce_only: bool = False,
+        leverage: int = 1,
+    ) -> "Order":
+        """
+        Create a take profit market order.
+        
+        When price hits stop_price, executes at market price.
+        Used for taking profits - guaranteed execution, possible slippage.
+        """
+        now = dt.now(dt_timezone.utc)
+        return cls(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            bot_id=bot_id,
+            exchange_connection_id=exchange_connection_id,
+            symbol=symbol,
+            side=side,
+            order_type=OrderType.TAKE_PROFIT_MARKET,
+            quantity=OrderQuantity(quantity),
+            stop_price=OrderPrice(stop_price),
+            position_side=position_side,
+            working_type=working_type,
+            reduce_only=reduce_only,
+            leverage=leverage,
+            status=OrderStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+    
+    @classmethod
+    def create_take_profit_limit_order(
+        cls,
+        user_id: uuid.UUID,
+        exchange_connection_id: uuid.UUID,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Decimal,
+        stop_price: Decimal,
+        bot_id: Optional[uuid.UUID] = None,
+        position_side: PositionSide = PositionSide.BOTH,
+        time_in_force: TimeInForce = TimeInForce.GTC,
+        working_type: WorkingType = WorkingType.CONTRACT_PRICE,
+        reduce_only: bool = False,
+        leverage: int = 1,
+    ) -> "Order":
+        """
+        Create a take profit limit order.
+        
+        When price hits stop_price, places a limit order at price.
+        Used for taking profits with price control - may not execute if price moves fast.
+        """
+        now = dt.now(dt_timezone.utc)
+        return cls(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            bot_id=bot_id,
+            exchange_connection_id=exchange_connection_id,
+            symbol=symbol,
+            side=side,
+            order_type=OrderType.TAKE_PROFIT,
+            quantity=OrderQuantity(quantity),
+            price=OrderPrice(price),
+            stop_price=OrderPrice(stop_price),
+            time_in_force=time_in_force,
+            position_side=position_side,
+            working_type=working_type,
+            reduce_only=reduce_only,
+            leverage=leverage,
+            status=OrderStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+        )
+    
+    @classmethod
+    def create_trailing_stop_market_order(
+        cls,
+        user_id: uuid.UUID,
+        exchange_connection_id: uuid.UUID,
+        symbol: str,
+        side: OrderSide,
+        quantity: Decimal,
+        callback_rate: Decimal,
+        activation_price: Optional[Decimal] = None,
+        bot_id: Optional[uuid.UUID] = None,
+        position_side: PositionSide = PositionSide.BOTH,
+        working_type: WorkingType = WorkingType.CONTRACT_PRICE,
+        reduce_only: bool = False,
+        leverage: int = 1,
+    ) -> "Order":
+        """
+        Create a trailing stop market order.
+        
+        Stop price trails the market price by callback_rate percentage.
+        Used for dynamic stop loss that follows profitable price movement.
+        
+        Args:
+            callback_rate: Percentage to trail (e.g., 1.0 = 1%)
+            activation_price: Optional price at which trailing starts
+        """
+        now = dt.now(dt_timezone.utc)
+        return cls(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            bot_id=bot_id,
+            exchange_connection_id=exchange_connection_id,
+            symbol=symbol,
+            side=side,
+            order_type=OrderType.TRAILING_STOP_MARKET,
+            quantity=OrderQuantity(quantity),
+            stop_price=OrderPrice(activation_price) if activation_price else None,
+            callback_rate=callback_rate,
             position_side=position_side,
             working_type=working_type,
             reduce_only=reduce_only,
@@ -345,6 +525,59 @@ class Order:
         if self.quantity.value == 0:
             return 0.0
         return float(self.execution.executed_quantity / self.quantity.value * 100)
+    
+    def clone_for_modification(
+        self,
+        new_quantity: Optional[Decimal] = None,
+        new_price: Optional[Decimal] = None,
+        new_stop_price: Optional[Decimal] = None,
+    ) -> "Order":
+        """
+        Clone this order with optional modifications.
+        
+        Creates a new Order instance with a new ID, preserving most properties
+        from the original but applying any specified modifications.
+        
+        Used for cancel-and-replace order modification pattern.
+        
+        Args:
+            new_quantity: New quantity, or None to keep original
+            new_price: New price (for limit orders), or None to keep original
+            new_stop_price: New stop price (for stop orders), or None to keep original
+            
+        Returns:
+            A new Order instance with the modifications applied
+        """
+        return Order(
+            id=uuid.uuid4(),  # New ID for the replacement order
+            user_id=self.user_id,
+            exchange_connection_id=self.exchange_connection_id,
+            symbol=self.symbol,
+            side=self.side,
+            order_type=self.order_type,
+            quantity=OrderQuantity(new_quantity) if new_quantity else self.quantity,
+            status=OrderStatus.PENDING,  # Start fresh
+            price=OrderPrice(new_price) if new_price else self.price,
+            stop_price=OrderPrice(new_stop_price) if new_stop_price else self.stop_price,
+            time_in_force=self.time_in_force,
+            position_side=self.position_side,
+            working_type=self.working_type,
+            reduce_only=self.reduce_only,
+            close_position=self.close_position,
+            price_protect=self.price_protect,
+            callback_rate=self.callback_rate,
+            leverage=self.leverage,
+            margin_type=self.margin_type,
+            bot_id=self.bot_id,
+            meta_data=self.meta_data.copy() if self.meta_data else None,
+            # Reset execution-specific fields
+            exchange_order_id=None,
+            client_order_id=None,
+            execution=OrderExecution(),
+            created_at=dt.now(dt_timezone.utc),
+            updated_at=dt.now(dt_timezone.utc),
+            error_message=None,
+        )
     
     def to_exchange_params(self) -> Dict[str, Any]:
         """Convert to exchange API parameters."""

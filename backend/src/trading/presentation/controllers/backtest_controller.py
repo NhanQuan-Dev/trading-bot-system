@@ -1,6 +1,7 @@
 """Backtesting API controller."""
 
 import logging
+import uuid
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, Response
@@ -26,11 +27,18 @@ from ...application.backtesting.schemas import (
     BacktestListResponse,
     BacktestStatusResponse,
 )
-from ...domain.backtesting import BacktestConfig
+from ...domain.backtesting import BacktestConfig, BacktestRun
+from ...domain.exchange import ExchangeType
 from ...infrastructure.backtesting import BacktestRepository
 from ...infrastructure.persistence.database import get_db
 from ...infrastructure.exchange.binance_adapter import BinanceAdapter
 from ...infrastructure.services.market_data_service import MarketDataService
+from ...infrastructure.repositories.exchange_repository import ExchangeRepository
+from ...infrastructure.persistence.repositories.market_data_repository import CandleRepository, MarketMetadataRepository
+from ...domain.market_data.gap_detector import GapDetector
+from ...domain.user import User
+from ...interfaces.dependencies.auth import get_current_active_user
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +53,17 @@ async def get_backtest_repository(
     return BacktestRepository(db)
 
 
-# Mock user ID (replace with actual auth)
-def get_current_user_id() -> UUID:
+def get_current_user_id(user: User = Depends(get_current_active_user)) -> UUID:
     """Get current user ID from auth."""
-    # TODO: Replace with actual auth
-    return UUID("00000000-0000-0000-0000-000000000001")
+    return user.id
+
 
 
 @router.post("", response_model=BacktestRunResponse, status_code=202)
 async def run_backtest(
     request: RunBacktestRequest,
     background_tasks: BackgroundTasks,
-    user_id: UUID = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_active_user),
     repository: BacktestRepository = Depends(get_backtest_repository),
 ):
     """
@@ -66,6 +73,8 @@ async def run_backtest(
     """
     
     try:
+        user_id = current_user.id
+        
         # Convert request to domain config
         config = BacktestConfig(
             symbol=request.config.symbol,  # Add symbol to config
@@ -93,28 +102,69 @@ async def run_backtest(
         
         logger.info(f"Loaded strategy function for ID: {request.strategy_id}")
         
-        # Create use case
-        # Initialize adapter with environment variables or defaults
-        # For public data (backtesting), keys can be dummy if not set
-        api_key = os.getenv("BINANCE_API_KEY", "")
-        api_secret = os.getenv("BINANCE_API_SECRET", "")
+        # Lookup exchange connection and create appropriate adapter
+        exchange_repo = ExchangeRepository(repository._session)
+        exchange_connection = await exchange_repo.find_by_id(request.exchange_connection_id)
         
-        adapter = BinanceAdapter(api_key=api_key, api_secret=api_secret)
-        market_data_service = MarketDataService(adapter)
+        if not exchange_connection:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Exchange connection {request.exchange_connection_id} not found"
+            )
+        
+        # Verify the connection belongs to the user
+        if exchange_connection.user_id != user_id:
+            raise HTTPException(
+                status_code=403, 
+                detail="Not authorized to use this exchange connection"
+            )
+        
+        # Get API credentials from connection
+        api_key = exchange_connection.credentials.api_key
+        api_secret = exchange_connection.credentials.secret_key
+        is_testnet = exchange_connection.is_testnet
+        
+        # Create adapter based on exchange type
+        if exchange_connection.exchange_type == ExchangeType.BINANCE:
+            adapter = BinanceAdapter(api_key=api_key, api_secret=api_secret, testnet=is_testnet)
+        else:
+            # For unsupported exchanges, raise error
+            raise HTTPException(
+                status_code=400,
+                detail=f"Exchange type {exchange_connection.exchange_type} not yet supported for backtesting"
+            )
+        
+        # Instantiate dependencies for MarketDataService
+        candle_repo = CandleRepository(repository._session)
+        metadata_repo = MarketMetadataRepository(repository._session)
+        gap_detector = GapDetector()
+        
+        market_data_service = MarketDataService(
+            exchange_adapter=adapter,
+            candle_repository=candle_repo,
+            metadata_repository=metadata_repo,
+            gap_detector=gap_detector
+        )
         
         use_case = RunBacktestUseCase(repository, market_data_service)
+
         
         # Create backtest run entity FIRST (before background task)
-        from ...domain.backtesting import BacktestRun
+    # Create BacktestRun entity
+        backtest_id = uuid.uuid4()
         backtest_run = BacktestRun(
-            user_id=user_id,
+            id=backtest_id,
+            user_id=current_user.id,
             strategy_id=request.strategy_id,
+            exchange_connection_id=request.exchange_connection_id,
+            exchange_name=exchange_connection.name,
             symbol=request.config.symbol,
             timeframe=request.config.timeframe,
             start_date=request.config.start_date,
             end_date=request.config.end_date,
             config=config,
         )
+
         await repository.save(backtest_run)
         backtest_id = backtest_run.id
         
@@ -330,7 +380,7 @@ async def delete_backtest(
 async def get_backtest_trades(
     backtest_id: UUID,
     page: int = Query(1, ge=1, description="Page number"),
-    limit: int = Query(100, ge=1, le=500, description="Items per page"),
+    limit: int = Query(100, ge=1, le=10000, description="Items per page (max 10000 for chart visualization)"),
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
     side: Optional[str] = Query(None, description="Filter by side (buy/sell)"),
     min_pnl: Optional[float] = Query(None, description="Minimum P&L filter"),
@@ -434,7 +484,7 @@ async def get_backtest_equity_curve(
         
         return [
             {
-                "timestamp": point.timestamp.isoformat(),
+                "timestamp": point.timestamp if isinstance(point.timestamp, str) else point.timestamp.isoformat(),
                 "equity": float(point.equity),
                 "drawdown": float(point.drawdown_pct) if hasattr(point, 'drawdown_pct') else 0.0
             }

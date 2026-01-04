@@ -8,13 +8,16 @@ import uuid
 
 
 class BotStatus(str, Enum):
-    """Bot status enumeration."""
-    ACTIVE = "ACTIVE"      # Bot is running and can trade
-    PAUSED = "PAUSED"      # Bot is paused, not trading
-    STOPPED = "STOPPED"    # Bot is stopped
-    ERROR = "ERROR"        # Bot encountered error
-    STARTING = "STARTING"  # Bot is starting up
-    STOPPING = "STOPPING"  # Bot is stopping
+    """Bot status enumeration.
+    
+    Simplified to 3 core states:
+    - RUNNING: Bot is active and can trade
+    - PAUSED: Bot is paused (also used as initial/default state)
+    - ERROR: Bot encountered an error
+    """
+    RUNNING = "RUNNING"  # Bot is running and can trade
+    PAUSED = "PAUSED"    # Bot is paused (default state)
+    ERROR = "ERROR"      # Bot encountered error
 
 
 class StrategyType(str, Enum):
@@ -26,6 +29,8 @@ class StrategyType(str, Enum):
     MEAN_REVERSION = "MEAN_REVERSION"    # Mean reversion
     ARBITRAGE = "ARBITRAGE"          # Arbitrage
     CUSTOM = "CUSTOM"                # Custom strategy
+
+BotType = StrategyType
 
 
 class RiskLevel(str, Enum):
@@ -53,12 +58,15 @@ class BotConfiguration:
     # Risk management
     max_daily_loss: Optional[Decimal] = None
     max_drawdown: Optional[Decimal] = None
+    bot_type: Optional["BotType"] = None
     
     def __post_init__(self):
-        if self.base_quantity <= 0:
-            raise ValueError("Base quantity must be positive")
-        if self.quote_quantity <= 0:
-            raise ValueError("Quote quantity must be positive")
+        if self.base_quantity <= 0 and self.quote_quantity <= 0:
+            raise ValueError("Either base quantity or quote quantity must be positive")
+        # if self.base_quantity <= 0:   <-- Removed strict check
+        #     raise ValueError("Base quantity must be positive")
+        # if self.quote_quantity <= 0:  <-- Removed strict check
+        #     raise ValueError("Quote quantity must be positive")
         if self.max_active_orders <= 0:
             raise ValueError("Max active orders must be positive")
         if not (0 < self.risk_percentage <= 100):
@@ -205,7 +213,7 @@ class Bot:
     stop_time: Optional[dt] = None
     last_error: Optional[str] = None
     
-    # Performance tracking
+    # Performance tracking (legacy JSON-based)
     performance: BotPerformance = field(default_factory=BotPerformance)
     
     # Operational data
@@ -215,6 +223,25 @@ class Bot:
     
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    # === NEW: Cumulative Stats (from DB columns) ===
+    total_pnl: Decimal = Decimal("0")
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    
+    # === NEW: Streak Tracking ===
+    current_win_streak: int = 0
+    current_loss_streak: int = 0
+    max_win_streak: int = 0
+    max_loss_streak: int = 0
+    
+    @property
+    def win_rate(self) -> float:
+        """Calculate win rate percentage (0-100)."""
+        if self.total_trades == 0:
+            return 0.0
+        return round((self.winning_trades / self.total_trades) * 100, 2)
     
     @classmethod
     def create(
@@ -236,7 +263,7 @@ class Bot:
             name=name,
             strategy_id=strategy_id,
             exchange_connection_id=exchange_connection_id,
-            status=BotStatus.STOPPED,
+            status=BotStatus.PAUSED,  # Default state is PAUSED
             configuration=configuration,
             description=description,
             risk_level=risk_level,
@@ -246,25 +273,24 @@ class Bot:
     
     def start(self) -> None:
         """Start the bot."""
-        if self.status in [BotStatus.STARTING, BotStatus.ACTIVE]:
+        if self.status == BotStatus.RUNNING:
             raise ValueError(f"Cannot start bot in {self.status} status")
         
-        self.status = BotStatus.STARTING
-        self.start_time = dt.now(dt_timezone.utc)
+        self.status = BotStatus.RUNNING
+        if not self.start_time:  # Only set if not already set (for retry)
+            self.start_time = dt.now(dt_timezone.utc)
         self.updated_at = dt.now(dt_timezone.utc)
         self.last_error = None
     
     def mark_active(self) -> None:
-        """Mark bot as successfully started and active."""
-        if self.status != BotStatus.STARTING:
-            raise ValueError(f"Cannot mark active from {self.status} status")
-        
-        self.status = BotStatus.ACTIVE
+        """Mark bot as successfully started and active (alias for compatibility)."""
+        if self.status != BotStatus.RUNNING:
+            self.status = BotStatus.RUNNING
         self.updated_at = dt.now(dt_timezone.utc)
     
     def pause(self, reason: Optional[str] = None) -> None:
         """Pause the bot."""
-        if self.status != BotStatus.ACTIVE:
+        if self.status != BotStatus.RUNNING:
             raise ValueError(f"Cannot pause bot in {self.status} status")
         
         self.status = BotStatus.PAUSED
@@ -273,32 +299,29 @@ class Bot:
             self.metadata["pause_reason"] = reason
     
     def resume(self) -> None:
-        """Resume the bot from paused state."""
+        """Resume the bot from paused state (alias for start)."""
         if self.status != BotStatus.PAUSED:
             raise ValueError(f"Cannot resume bot in {self.status} status")
         
-        self.status = BotStatus.ACTIVE
+        self.status = BotStatus.RUNNING
         self.updated_at = dt.now(dt_timezone.utc)
         if "pause_reason" in self.metadata:
             del self.metadata["pause_reason"]
     
     def stop(self, reason: Optional[str] = None) -> None:
-        """Stop the bot."""
-        if self.status in [BotStatus.STOPPED, BotStatus.STOPPING]:
-            raise ValueError(f"Bot is already {self.status}")
+        """Stop the bot (transitions to PAUSED state)."""
+        if self.status == BotStatus.PAUSED:
+            return  # Already paused, no-op
         
-        self.status = BotStatus.STOPPING
+        self.status = BotStatus.PAUSED
         self.stop_time = dt.now(dt_timezone.utc)
         self.updated_at = dt.now(dt_timezone.utc)
         if reason:
             self.metadata["stop_reason"] = reason
     
     def mark_stopped(self) -> None:
-        """Mark bot as successfully stopped."""
-        if self.status != BotStatus.STOPPING:
-            raise ValueError(f"Cannot mark stopped from {self.status} status")
-        
-        self.status = BotStatus.STOPPED
+        """Mark bot as stopped (transitions to PAUSED state)."""
+        self.status = BotStatus.PAUSED
         self.active_orders.clear()
         self.updated_at = dt.now(dt_timezone.utc)
     
@@ -311,8 +334,8 @@ class Bot:
     
     def update_configuration(self, configuration: BotConfiguration) -> None:
         """Update bot configuration (only when stopped)."""
-        if self.status != BotStatus.STOPPED:
-            raise ValueError("Can only update configuration when bot is stopped")
+        if self.status != BotStatus.PAUSED:
+            raise ValueError("Can only update configuration when bot is paused")
         
         self.configuration = configuration
         self.updated_at = dt.now(dt_timezone.utc)
@@ -335,30 +358,43 @@ class Bot:
         self.updated_at = dt.now(dt_timezone.utc)
     
     def is_active(self) -> bool:
-        """Check if bot is in active state."""
-        return self.status == BotStatus.ACTIVE
+        """Check if bot is in running state."""
+        return self.status == BotStatus.RUNNING
     
     def is_stopped(self) -> bool:
-        """Check if bot is stopped."""
-        return self.status == BotStatus.STOPPED
+        """Check if bot is paused (stopped)."""
+        return self.status == BotStatus.PAUSED
     
     def can_be_started(self) -> bool:
         """Check if bot can be started."""
-        return self.status in [BotStatus.STOPPED, BotStatus.ERROR]
+        return self.status in [BotStatus.PAUSED, BotStatus.ERROR]
     
     def can_be_stopped(self) -> bool:
-        """Check if bot can be stopped."""
-        return self.status in [BotStatus.ACTIVE, BotStatus.PAUSED, BotStatus.ERROR]
+        """Check if bot can be stopped (paused)."""
+        return self.status == BotStatus.RUNNING
     
     def get_runtime_seconds(self) -> int:
         """Get current runtime in seconds."""
         if not self.start_time:
             return 0
         
-        if self.status in [BotStatus.ACTIVE, BotStatus.PAUSED]:
-            return int((dt.now(dt_timezone.utc) - self.start_time).total_seconds())
-        elif self.stop_time:
-            return int((self.stop_time - self.start_time).total_seconds())
+        start = self.start_time
+        if isinstance(start, str):
+            start = dt.fromisoformat(start)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=dt_timezone.utc)
+            
+        stop = self.stop_time
+        if stop:
+            if isinstance(stop, str):
+                stop = dt.fromisoformat(stop)
+            if stop.tzinfo is None:
+                stop = stop.replace(tzinfo=dt_timezone.utc)
+        
+        if self.status in [BotStatus.RUNNING, BotStatus.PAUSED]:
+            return int((dt.now(dt_timezone.utc) - start).total_seconds())
+        elif stop:
+            return int((stop - start).total_seconds())
         
         return 0
 
@@ -372,4 +408,5 @@ __all__ = [
     "BotPerformance",
     "Strategy",
     "Bot",
+    "BotType",
 ]

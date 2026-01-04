@@ -39,6 +39,25 @@ from ...interfaces.dependencies.providers import (
 )
 
 
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Lazy handler registration
+_handler_registered = False
+
+def ensure_handler_registered(binance_adapter, candle_repo):
+    """Ensure fetch_missing_candles handler is registered."""
+    global _handler_registered
+    if not _handler_registered:
+        from ...infrastructure.jobs.job_worker import JobWorker
+        from ...infrastructure.jobs.fetch_missing_candles_job import FetchMissingCandlesJobV2
+        handler = FetchMissingCandlesJobV2(binance_adapter, candle_repo)
+        JobWorker.register_handler("fetch_missing_candles", handler.execute)
+        _handler_registered = True
+        logger.info("Registered fetch_missing_candles handler")
+
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
 
@@ -301,10 +320,23 @@ async def get_candles(
     interval: CandleInterval = Query(...),
     start_time: Optional[dt] = Query(None),
     end_time: Optional[dt] = Query(None),
-    limit: Optional[int] = Query(None, ge=1, le=1000),
+    limit: Optional[int] = Query(None, ge=1, description="Maximum number of candles to return (no upper limit)"),
+    repair: bool = Query(False, description="Attempt to repair missing data gaps"),
     get_candles_use_case: GetCandleDataUseCase = Depends(get_get_candle_data_use_case),
 ):
     """Get candle data for a symbol."""
+    # @cache_response(ttl=60)
+    # Ensure background job handler is registered
+    from ...infrastructure.exchange.binance_adapter import BinanceAdapter
+    from ...infrastructure.persistence.repositories.market_data_repository import CandleRepository
+    from ...infrastructure.persistence.database import get_db_context
+    
+    # Lazy registration with dependencies
+    async with get_db_context() as session:
+        binance = BinanceAdapter(api_key="", api_secret="")  # Public endpoints don't need keys
+        repo = CandleRepository(session)
+        ensure_handler_registered(binance, repo)
+    
     try:
         candles = await get_candles_use_case.execute(
             symbol=symbol.upper(),
@@ -312,6 +344,7 @@ async def get_candles(
             start_time=start_time,
             end_time=end_time,
             limit=limit,
+            repair=repair
         )
         return [candle_to_response(candle) for candle in candles]
     

@@ -1,5 +1,5 @@
 """SQLAlchemy models for market data tables."""
-from sqlalchemy import Column, String, Integer, ForeignKey, Index, CheckConstraint, DECIMAL, BigInteger, Boolean, DateTime, JSON
+from sqlalchemy import Column, String, Integer, ForeignKey, Index, CheckConstraint, DECIMAL, BigInteger, Boolean, DateTime, JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY, UUID
 from sqlalchemy.orm import relationship
 from decimal import Decimal
@@ -9,6 +9,34 @@ from ..database import Base
 
 # Cross-database JSON type (JSONB for PostgreSQL, JSON for SQLite)
 JSONType = JSON().with_variant(JSONB(), "postgresql")
+
+
+class MarketMetadataModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Market metadata availability and status tracking."""
+    
+    __tablename__ = "market_data_metadata"
+    __table_args__ = (
+        UniqueConstraint('exchange', 'symbol', 'timeframe', name='uq_metadata_exchange_symbol_tf'),
+        Index('idx_metadata_status', 'status'),
+        {'comment': 'Tracks availability and fetch status of market data periods'}
+    )
+    
+    exchange = Column(String(20), nullable=False, comment="Exchange name")
+    symbol = Column(String(20), nullable=False, comment="Trading symbol")
+    timeframe = Column(String(5), nullable=False, comment="Candle timeframe")
+    
+    # Availability
+    earliest_available_time = Column(DateTime(timezone=True), nullable=True, comment="Earliest data time on exchange")
+    status = Column(String(20), nullable=False, default='EMPTY', comment="Data status: EMPTY, PARTIAL, FULL")
+    
+    # Audit
+    last_checked_at = Column(DateTime(timezone=True), nullable=True, comment="Last availability check")
+    last_fetched_at = Column(DateTime(timezone=True), nullable=True, comment="Last successful fetch")
+    
+    # Repair state
+    repair_in_progress = Column(Boolean, default=False, comment="Is auto-repair running?")
+    error_message = Column(String(500), nullable=True, comment="Last error message")
+
 
 
 class MarketDataSubscriptionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):

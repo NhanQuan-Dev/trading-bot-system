@@ -8,7 +8,7 @@ from ..base import StrategyBase
 logger = logging.getLogger(__name__)
 
 class TrendFollowingStrategy(StrategyBase):
-    name = "Trend Following"
+    name = "TREND_FOLLOWING"
     description = "Identifies and follows market momentum. Buys when the trend is up (Golden Cross) and sells when it reverses."
 
     def __init__(self, exchange, config: Dict[str, Any]):

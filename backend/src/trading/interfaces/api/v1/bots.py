@@ -30,43 +30,52 @@ router = APIRouter(prefix="/bots", tags=["Bots"])
 
 def _to_bot_response(bot: Bot) -> BotResponse:
     """Convert Bot entity to response."""
+    # Map domain configuration to API configuration response
+    config = bot.configuration
+    config_response = BotConfigurationResponse(
+        bot_type=config.bot_type.value if config.bot_type else "GRID",
+        symbol=config.symbol,
+        exchange_connection_id=bot.exchange_connection_id,  # From bot, not config
+        max_position_size=float(config.base_quantity or config.quote_quantity),
+        max_open_orders=config.max_active_orders,
+        leverage=1,  # Default leverage
+        strategy_params=config.strategy_settings,
+        stop_loss_pct=float(config.stop_loss_percentage),
+        take_profit_pct=float(config.take_profit_percentage),
+        max_daily_loss=float(config.max_daily_loss) if config.max_daily_loss else None,
+    )
+    
+    # Map domain performance to API metrics response
+    perf = bot.performance
+    metrics_response = BotMetricsResponse(
+        total_trades=perf.total_trades,
+        winning_trades=perf.winning_trades,
+        losing_trades=perf.losing_trades,
+        total_profit=float(perf.total_profit_loss) if perf.total_profit_loss > 0 else 0,
+        total_loss=float(abs(perf.total_profit_loss)) if perf.total_profit_loss < 0 else 0,
+        net_profit=float(perf.total_profit_loss),
+        win_rate=perf.winning_trades / perf.total_trades * 100 if perf.total_trades > 0 else 0,
+        avg_profit=0,  # Not tracked in domain
+        avg_loss=0,    # Not tracked in domain
+        max_drawdown=float(perf.max_drawdown),
+        profit_factor=0,  # Not tracked in domain
+        sharpe_ratio=float(perf.sharpe_ratio) if perf.sharpe_ratio else None,
+    )
+    
     return BotResponse(
         id=bot.id,
         user_id=bot.user_id,
         name=bot.name,
         description=bot.description,
-        configuration=BotConfigurationResponse(
-            bot_type=bot.configuration.bot_type.value,
-            symbol=bot.configuration.symbol,
-            exchange_connection_id=bot.configuration.exchange_connection_id,
-            max_position_size=bot.configuration.max_position_size,
-            max_open_orders=bot.configuration.max_open_orders,
-            leverage=bot.configuration.leverage,
-            strategy_params=bot.configuration.strategy_params,
-            stop_loss_pct=bot.configuration.stop_loss_pct,
-            take_profit_pct=bot.configuration.take_profit_pct,
-            max_daily_loss=bot.configuration.max_daily_loss,
-        ),
+        strategy_id=bot.strategy_id,
+        configuration=config_response,
         status=bot.status.value,
-        is_active=bot.is_active,
-        metrics=BotMetricsResponse(
-            total_trades=bot.metrics.total_trades,
-            winning_trades=bot.metrics.winning_trades,
-            losing_trades=bot.metrics.losing_trades,
-            total_profit=bot.metrics.total_profit,
-            total_loss=bot.metrics.total_loss,
-            net_profit=bot.metrics.net_profit,
-            win_rate=bot.metrics.win_rate,
-            avg_profit=bot.metrics.avg_profit,
-            avg_loss=bot.metrics.avg_loss,
-            max_drawdown=bot.metrics.max_drawdown,
-            profit_factor=bot.metrics.profit_factor,
-            sharpe_ratio=bot.metrics.sharpe_ratio,
-        ),
-        started_at=bot.started_at,
-        stopped_at=bot.stopped_at,
-        last_trade_at=bot.last_trade_at,
-        error_message=bot.error_message,
+        is_active=bot.is_active(),
+        metrics=metrics_response,
+        started_at=bot.start_time,
+        stopped_at=bot.stop_time,
+        last_trade_at=None,  # Not tracked in domain
+        error_message=bot.last_error,
         created_at=bot.created_at,
         updated_at=bot.updated_at,
     )
@@ -116,6 +125,8 @@ async def create_bot(
         bot = Bot.create(
             user_id=current_user.id,
             name=request.name,
+            strategy_id=request.strategy_id,
+            exchange_connection_id=request.configuration.exchange_connection_id,
             configuration=configuration,
             description=request.description,
         )
@@ -306,43 +317,36 @@ async def start_bot(
     Returns:
         Action result
     """
-    bot_repo = BotRepository(db)
+    # Use BotManager for execution (optional - may not be initialized)
+    from ....application.services.bot_manager import get_bot_manager
+    from ....application.use_cases.bot_use_cases import StartBotUseCase
     
     try:
-        bot = await bot_repo.find_by_id(uuid.UUID(bot_id))
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid bot ID format",
-        )
-    
-    if not bot:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Bot not found",
-        )
-    
-    # Verify ownership
-    if bot.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to start this bot",
-        )
-    
-    # Start bot
-    try:
-        bot.start()
-        await bot_repo.save(bot)
-        await db.commit()
+        # Try to get bot manager, but it's optional for basic status update
+        try:
+            bot_manager = get_bot_manager()
+        except RuntimeError:
+            bot_manager = None  # Manager not initialized, will just update DB status
+        
+        bot_repo = BotRepository(db)
+        use_case = StartBotUseCase(bot_repo, bot_manager)
+        
+        updated_bot = await use_case.execute(current_user.id, uuid.UUID(bot_id))
         
         return BotActionResponse(
             success=True,
             message="Bot started successfully",
-            bot=_to_bot_response(bot),
+            bot=_to_bot_response(updated_bot),
         )
-    except ValueError as e:
+    except Exception as e:
+        status_code = status.HTTP_400_BAD_REQUEST
+        if "not found" in str(e).lower():
+            status_code = status.HTTP_404_NOT_FOUND
+        elif "not authorized" in str(e).lower():
+            status_code = status.HTTP_403_FORBIDDEN
+            
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status_code,
             detail=str(e),
         )
 
@@ -364,43 +368,36 @@ async def stop_bot(
     Returns:
         Action result
     """
-    bot_repo = BotRepository(db)
+    # Use BotManager for execution (optional - may not be initialized)
+    from ....application.services.bot_manager import get_bot_manager
+    from ....application.use_cases.bot_use_cases import StopBotUseCase
     
     try:
-        bot = await bot_repo.find_by_id(uuid.UUID(bot_id))
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid bot ID format",
-        )
-    
-    if not bot:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Bot not found",
-        )
-    
-    # Verify ownership
-    if bot.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to stop this bot",
-        )
-    
-    # Stop bot
-    try:
-        bot.stop()
-        await bot_repo.save(bot)
-        await db.commit()
+        # Try to get bot manager, but it's optional for basic status update
+        try:
+            bot_manager = get_bot_manager()
+        except RuntimeError:
+            bot_manager = None  # Manager not initialized, will just update DB status
+        
+        bot_repo = BotRepository(db)
+        use_case = StopBotUseCase(bot_repo, bot_manager)
+        
+        updated_bot = await use_case.execute(current_user.id, uuid.UUID(bot_id))
         
         return BotActionResponse(
             success=True,
             message="Bot stopped successfully",
-            bot=_to_bot_response(bot),
+            bot=_to_bot_response(updated_bot),
         )
-    except ValueError as e:
+    except Exception as e:
+        status_code = status.HTTP_400_BAD_REQUEST
+        if "not found" in str(e).lower():
+            status_code = status.HTTP_404_NOT_FOUND
+        elif "not authorized" in str(e).lower():
+            status_code = status.HTTP_403_FORBIDDEN
+            
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status_code,
             detail=str(e),
         )
 

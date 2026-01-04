@@ -91,6 +91,57 @@ async def create_order(
                 reduce_only=order_data.reduce_only,
                 leverage=order_data.leverage,
             )
+        elif order_data.order_type == OrderType.TAKE_PROFIT_MARKET:
+            if order_data.stop_price is None:
+                raise ValueError("Stop price is required for take profit market orders")
+            order = Order.create_take_profit_market_order(
+                user_id=user.id,
+                exchange_connection_id=order_data.exchange_connection_id,
+                symbol=order_data.symbol,
+                side=order_data.side,
+                quantity=order_data.quantity,
+                stop_price=order_data.stop_price,
+                bot_id=order_data.bot_id,
+                position_side=order_data.position_side,
+                working_type=order_data.working_type,
+                reduce_only=order_data.reduce_only,
+                leverage=order_data.leverage,
+            )
+        elif order_data.order_type == OrderType.TAKE_PROFIT:
+            if order_data.price is None or order_data.stop_price is None:
+                raise ValueError("Price and stop price are required for take profit limit orders")
+            order = Order.create_take_profit_limit_order(
+                user_id=user.id,
+                exchange_connection_id=order_data.exchange_connection_id,
+                symbol=order_data.symbol,
+                side=order_data.side,
+                quantity=order_data.quantity,
+                price=order_data.price,
+                stop_price=order_data.stop_price,
+                bot_id=order_data.bot_id,
+                position_side=order_data.position_side,
+                time_in_force=order_data.time_in_force,
+                working_type=order_data.working_type,
+                reduce_only=order_data.reduce_only,
+                leverage=order_data.leverage,
+            )
+        elif order_data.order_type == OrderType.TRAILING_STOP_MARKET:
+            if order_data.callback_rate is None:
+                raise ValueError("Callback rate is required for trailing stop market orders")
+            order = Order.create_trailing_stop_market_order(
+                user_id=user.id,
+                exchange_connection_id=order_data.exchange_connection_id,
+                symbol=order_data.symbol,
+                side=order_data.side,
+                quantity=order_data.quantity,
+                callback_rate=order_data.callback_rate,
+                activation_price=order_data.stop_price,  # stop_price used as activation price
+                bot_id=order_data.bot_id,
+                position_side=order_data.position_side,
+                working_type=order_data.working_type,
+                reduce_only=order_data.reduce_only,
+                leverage=order_data.leverage,
+            )
         else:
             raise ValueError(f"Order type {order_data.order_type} not implemented yet")
         
@@ -287,44 +338,44 @@ async def update_order(
     session: AsyncSession = Depends(get_db),
 ) -> OrderResponse:
     """
-    Update an existing order.
+    Update an existing order using cancel-and-replace pattern.
     
-    Only certain fields can be updated for active orders.
+    Since Binance Futures doesn't support direct order modification,
+    this endpoint will:
+    1. Cancel the existing order on the exchange
+    2. Create a new order with the updated parameters
+    3. Return the new replacement order
+    
+    Note: The original order will be marked as CANCELLED and a new order ID
+    will be returned. The new order's metadata will contain a reference
+    to the original order ID.
     """
     try:
-        # Get existing order
-        order = await repository.get_by_id(order_id, user.id)
-        if not order:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
-            )
+        # Import here to avoid circular dependencies
+        from ...application.use_cases.order.modify_order import ModifyOrderUseCase
+        from ...infrastructure.repositories.exchange_repository import ExchangeRepository
+        from ...infrastructure.exchange.exchange_manager import exchange_manager
         
-        # Check if order can be updated
-        if not order.is_active():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only active orders can be updated"
-            )
+        # Setup dependencies for ModifyOrderUseCase
+        exchange_repository = ExchangeRepository(session)
+        modify_use_case = ModifyOrderUseCase(
+            order_repository=repository,
+            exchange_repository=exchange_repository,
+            exchange_manager=exchange_manager,
+        )
         
-        # Update allowed fields
-        if order_data.quantity is not None:
-            order.quantity = OrderQuantity(order_data.quantity)
+        # Execute modify order use case
+        replacement_order = await modify_use_case.execute(
+            user_id=user.id,
+            order_id=order_id,
+            new_quantity=order_data.quantity,
+            new_price=order_data.price,
+            new_stop_price=None,  # UpdateOrderRequest doesn't have stop_price
+        )
         
-        if order_data.price is not None:
-            order.price = OrderPrice(order_data.price)
-        
-        if order_data.meta_data is not None:
-            order.meta_data = order_data.meta_data
-        
-        # Update timestamps
-        order.updated_at = dt.now()
-        
-        # Save changes
-        updated_order = await repository.update(order)
         await session.commit()
         
-        return _convert_to_response(updated_order)
+        return _convert_to_response(replacement_order)
         
     except HTTPException:
         raise

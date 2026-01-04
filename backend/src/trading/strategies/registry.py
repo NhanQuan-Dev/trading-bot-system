@@ -26,13 +26,16 @@ class StrategyRegistry:
         impl_dir = current_dir / self._strategies_dir
         
         if not impl_dir.exists():
-            logger.warning(f"Strategies directory {impl_dir} not found")
+            print(f"DEBUG: Strategies directory {impl_dir} not found")
             return
 
+        print(f"DEBUG: Scanning strategies in {impl_dir}")
         # Import all modules in the directory
         for item in impl_dir.iterdir():
             if item.is_file() and item.suffix == ".py" and item.name != "__init__.py":
-                module_name = f"trading.strategies.{self._strategies_dir}.{item.stem}"
+                module_name = f"{__package__}.{self._strategies_dir}.{item.stem}"
+                # module_name = f"trading.strategies.{self._strategies_dir}.{item.stem}"
+                print(f"DEBUG: Loading module {module_name}")
                 try:
                     module = importlib.import_module(module_name)
                     # Scan for StrategyBase subclasses
@@ -41,8 +44,10 @@ class StrategyRegistry:
                             issubclass(obj, StrategyBase) and 
                             obj is not StrategyBase):
                             
+                            print(f"DEBUG: Registering {name}")
                             self.register(obj)
                 except Exception as e:
+                    print(f"DEBUG: Failed to load strategy from {item.name}: {e}")
                     logger.error(f"Failed to load strategy from {item.name}: {e}")
 
     def register(self, strategy_cls: Type[StrategyBase]):

@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { apiClient } from '@/lib/api/client';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -41,6 +42,9 @@ interface BacktestItem {
   startDate: string;
   endDate: string;
   initialCapital: number;
+  // Exchange connection info
+  exchangeConnectionId: string;
+  exchangeName: string;
   netProfit: number | null;
   netProfitPercent: number | null;
   winRate: number | null;
@@ -50,11 +54,12 @@ interface BacktestItem {
   profitFactor: number | null; // Not available in list view typically
   status: BacktestStatus;
   progress: number;
+  statusMessage: string | null; // NEW: User-friendly progress message
   createdAt: string;
 }
 
 const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
-  running: { label: 'Running', color: 'border-primary/50 text-primary', icon: Play },
+  running: { label: 'Running', color: 'border-primary/50 text-primary bg-primary/10', icon: Play },
   pending: { label: 'Pending', color: 'border-yellow-500/50 text-yellow-500', icon: Clock },
   paused: { label: 'Paused', color: 'border-accent/50 text-accent', icon: Pause },
   completed: { label: 'Completed', color: 'border-muted/50 text-muted-foreground', icon: Square },
@@ -63,6 +68,17 @@ const statusConfig: Record<string, { label: string; color: string; icon: any }> 
   cancelled: { label: 'Cancelled', color: 'border-muted/50 text-muted-foreground', icon: Square }
 };
 
+// Add shimmer animation
+const shimmerStyle = document.createElement('style');
+shimmerStyle.innerHTML = `
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+`;
+document.head.appendChild(shimmerStyle);
+
 export default function Backtest() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -70,11 +86,13 @@ export default function Backtest() {
   const [backtests, setBacktests] = useState<BacktestItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [strategies, setStrategies] = useState<{ id: string; name: string; }[]>([]);
+  const [exchangeConnections, setExchangeConnections] = useState<{ id: string; name: string; exchange_type?: string; }[]>([]);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStrategy, setFilterStrategy] = useState<string>('all');
   const [filterSymbol, setFilterSymbol] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [filterExchange, setFilterExchange] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [sortField, setSortField] = useState<SortField | null>(null);
@@ -92,14 +110,29 @@ export default function Backtest() {
 
 
 
+  const fetchExchangeConnections = async () => {
+    try {
+      const res = await apiClient.get('/api/v1/exchanges/connections');
+      const data = res.data;
+
+      if (Array.isArray(data)) {
+        setExchangeConnections(data);
+      }
+    } catch (error) {
+      console.error('Failed to load connections:', error);
+      // Don't throw - just empty list
+      setExchangeConnections([]);
+    }
+  };
+
 
   const fetchStrategies = async () => {
     console.log('[DEBUG] fetchStrategies START');
     try {
-      const res = await fetch('/api/v1/strategies');
+      const res = await apiClient.get('/api/v1/strategies');
       console.log('[DEBUG] fetchStrategies response received');
-      if (!res.ok) throw new Error('Failed to fetch strategies');
-      const data = await res.json();
+
+      const data = res.data;
       console.log('[DEBUG] fetchStrategies data:', data);
       if (Array.isArray(data)) {
         console.log('[DEBUG] Setting strategies:', data.length, 'items');
@@ -120,11 +153,11 @@ export default function Backtest() {
     console.log('[DEBUG] fetchBacktests START');
     try {
       setLoading(true);
-      const res = await fetch('/api/v1/backtests?limit=100');
+      // apiClient handles auth headers and 401s automatically
+      const res = await apiClient.get('/api/v1/backtests?limit=100');
       console.log('[DEBUG] fetchBacktests response received');
-      if (!res.ok) throw new Error('Failed to fetch backtests');
 
-      const data = await res.json();
+      const data = res.data;
       console.log('[DEBUG] fetchBacktests data received:', data.backtests?.length, 'items');
       if (!data.backtests || !Array.isArray(data.backtests)) {
         console.error("Invalid backtests data:", data);
@@ -140,6 +173,8 @@ export default function Backtest() {
         startDate: b.start_date,
         endDate: b.end_date,
         initialCapital: parseFloat(b.initial_capital),
+        exchangeConnectionId: b.exchange_connection_id,
+        exchangeName: b.exchange_name || exchangeConnections.find(e => e.id === b.exchange_connection_id)?.name || 'Unknown',
         netProfit: b.final_equity ? b.final_equity - b.initial_capital : null,
         netProfitPercent: b.total_return ? b.total_return * 100 : null,
         winRate: b.win_rate != null ? parseFloat(b.win_rate) : null,
@@ -149,6 +184,7 @@ export default function Backtest() {
         profitFactor: null,
         status: b.status.toLowerCase(),
         progress: b.progress_percent,
+        statusMessage: b.status_message || null, // NEW: Progress message from backend
         createdAt: b.created_at
       }));
       console.log('[DEBUG] setBacktests with', mapped.length, 'items');
@@ -167,6 +203,7 @@ export default function Backtest() {
     console.log('[DEBUG] Initial useEffect START');
     fetchBacktests();
     fetchStrategies();
+    fetchExchangeConnections();
     console.log('[DEBUG] Initial fetches triggered');
     // Poll for updates every 5 seconds if there are running backtests
     const interval = setInterval(() => {
@@ -210,6 +247,7 @@ export default function Backtest() {
   // Get unique strategies and symbols for filters
   const uniqueStrategies = useMemo(() => [...new Set(backtests.map(b => b.strategy))], [backtests]);
   const symbols = useMemo(() => [...new Set(backtests.map(b => b.symbol))], [backtests]);
+  const uniqueExchanges = useMemo(() => [...new Set(backtests.map(b => b.exchangeName).filter(Boolean))], [backtests]);
 
   // Filtered and sorted backtests
   const filteredBacktests = useMemo(() => {
@@ -221,7 +259,8 @@ export default function Backtest() {
       const matchesStrategy = filterStrategy === 'all' || bt.strategy === filterStrategy;
       const matchesSymbol = filterSymbol === 'all' || bt.symbol === filterSymbol;
       const matchesStatus = filterStatus === 'all' || bt.status === filterStatus;
-      return matchesSearch && matchesStrategy && matchesSymbol && matchesStatus;
+      const matchesExchange = filterExchange === 'all' || bt.exchangeName === filterExchange;
+      return matchesSearch && matchesStrategy && matchesSymbol && matchesStatus && matchesExchange;
     });
 
     // Apply sorting
@@ -253,7 +292,8 @@ export default function Backtest() {
     }
 
     return result;
-  }, [backtests, searchQuery, filterStrategy, filterSymbol, filterStatus, sortField, sortDirection]);
+  }, [backtests, searchQuery, filterStrategy, filterSymbol, filterStatus, filterExchange, sortField, sortDirection]);
+
 
   // Pagination
   const totalPages = Math.ceil(filteredBacktests.length / itemsPerPage);
@@ -293,12 +333,29 @@ export default function Backtest() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
 
-    // Get strategy ID directly from form - strategies dropdown already uses UUID
+    // Get strategy ID and exchange connection ID from form
     const strategyId = formData.get('strategy') as string;
+    const exchangeConnectionId = formData.get('exchangeConnection') as string;
+
+    // Validate strategy is selected
+    if (!strategyId || strategyId === '__no_strategies__') {
+      toast({ title: 'Please select a Strategy', variant: 'destructive' });
+      return;
+    }
+
+    // Validate exchange connection is selected
+    if (!exchangeConnectionId || exchangeConnectionId === '__no_connections__') {
+      toast({ title: 'Please select an Exchange Connection', variant: 'destructive' });
+      return;
+    }
+
     console.log("DEBUG: Strategy UUID =", strategyId);
+    console.log("DEBUG: Exchange Connection ID =", exchangeConnectionId);
+
 
     const payload = {
       strategy_id: strategyId,
+      exchange_connection_id: exchangeConnectionId,
       config: {
         symbol: formData.get('symbol'),
         timeframe: formData.get('timeframe'),
@@ -315,42 +372,37 @@ export default function Backtest() {
     console.log("DEBUG: Full payload =", JSON.stringify(payload, null, 2));
 
     try {
-      const res = await fetch('/api/v1/backtests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      console.log('Sending backtest request:', payload);
 
-      if (!res.ok) {
-        const errorData = await res.json();
-        console.error("DEBUG: Error response =", errorData);
-        throw new Error('Failed to create backtest');
-      }
+      const res = await apiClient.post('/api/v1/backtests', payload);
 
       toast({ title: 'Backtest started successfully' });
       setIsCreateOpen(false);
+
+      // Refresh list
       fetchBacktests();
-    } catch (error) {
+    } catch (error: any) {
       console.error("DEBUG: Catch error =", error);
-      toast({ title: 'Failed to start backtest', variant: 'destructive' });
+      toast({ title: error.message || 'Failed to start backtest', variant: 'destructive' });
     }
   };
 
+
   const handleStop = async (id: string) => {
     try {
-      const res = await fetch(`/api/v1/backtests/${id}/cancel`, { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to stop backtest');
-      toast({ title: 'Backtest stopped' });
+      await apiClient.post(`/api/v1/backtests/${id}/cancel`);
+
+      toast({ title: 'Backtest cancelled' });
       fetchBacktests();
     } catch (error) {
-      toast({ title: 'Failed to stop backtest', variant: 'destructive' });
+      toast({ title: 'Failed to cancel backtest', variant: 'destructive' });
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`/api/v1/backtests/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete backtest');
+      await apiClient.delete(`/api/v1/backtests/${id}`);
+
       toast({ title: 'Backtest deleted' });
       // If deleted item was selected, remove from selection
       if (selectedIds.has(id)) {
@@ -368,7 +420,7 @@ export default function Backtest() {
     if (selectedIds.size === 0) return;
     try {
       await Promise.all(Array.from(selectedIds).map(id =>
-        fetch(`/api/v1/backtests/${id}`, { method: 'DELETE' })
+        apiClient.delete(`/api/v1/backtests/${id}`)
       ));
       toast({ title: `Deleted ${selectedIds.size} backtest(s)` });
       setSelectedIds(new Set());
@@ -415,16 +467,44 @@ export default function Backtest() {
               <form onSubmit={handleCreateBacktest} className="space-y-4 pt-4">
                 <div className="space-y-2">
                   <Label>Strategy</Label>
-                  <Select name="strategy" defaultValue={strategies[0]?.id || ""} >
+                  <Select name="strategy" defaultValue={strategies[0]?.id || undefined} >
                     <SelectTrigger>
-                      <SelectValue />
+                      <SelectValue placeholder="Select strategy..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {strategies.map(s => (
-                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                      ))}
+                      {strategies.length === 0 ? (
+                        <SelectItem value="__no_strategies__" disabled>No strategies available</SelectItem>
+                      ) : (
+                        strategies.map(s => (
+                          <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                        ))
+                      )}
                     </SelectContent>
                   </Select>
+
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Exchange Connection <span className="text-destructive">*</span></Label>
+                  <Select name="exchangeConnection" defaultValue={exchangeConnections[0]?.id || undefined}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select exchange..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {exchangeConnections.length === 0 ? (
+                        <SelectItem value="__no_connections__" disabled>No connections available</SelectItem>
+                      ) : (
+                        exchangeConnections.map(e => (
+                          <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {exchangeConnections.length === 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Please add an exchange connection in Exchange settings first.
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -563,7 +643,19 @@ export default function Backtest() {
                   <SelectItem value="error">Error</SelectItem>
                 </SelectContent>
               </Select>
+              <Select value={filterExchange} onValueChange={setFilterExchange}>
+                <SelectTrigger className="w-[130px]">
+                  <SelectValue placeholder="Exchange" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Exchanges</SelectItem>
+                  {uniqueExchanges.map(e => (
+                    <SelectItem key={e} value={e}>{e}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+
             {/* Bulk Actions */}
             {selectedIds.size > 0 && (
               <div className="flex items-center gap-2 pt-3">
@@ -604,6 +696,7 @@ export default function Backtest() {
                         Symbol <SortIcon field="symbol" />
                       </button>
                     </TableHead>
+                    <TableHead>Exchange</TableHead>
                     <TableHead>Period</TableHead>
                     <TableHead>
                       <button
@@ -631,11 +724,12 @@ export default function Backtest() {
                     </TableHead>
                     <TableHead className="text-center">Actions</TableHead>
                   </TableRow>
+
                 </TableHeader>
                 <TableBody>
                   {paginatedBacktests.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center h-24 text-muted-foreground">
+                      <TableCell colSpan={9} className="text-center h-24 text-muted-foreground">
                         No backtests found. Create one to get started.
                       </TableCell>
                     </TableRow>
@@ -660,11 +754,17 @@ export default function Backtest() {
                         </TableCell>
                         <TableCell className="font-mono text-sm">{backtest.symbol}</TableCell>
                         <TableCell>
+                          <Badge variant="secondary" className="font-normal">
+                            {backtest.exchangeName || 'Unknown'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
                           <div className="flex items-center gap-1 text-xs text-muted-foreground">
                             <Clock className="h-3 w-3" />
                             <span>{backtest.startDate} - {backtest.endDate}</span>
                           </div>
                         </TableCell>
+
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <Badge variant="outline" className={config.color}>
@@ -672,9 +772,21 @@ export default function Backtest() {
                               {config.label}
                             </Badge>
                             {backtest.status === 'running' && (
-                              <div className="flex items-center gap-1">
-                                <Progress value={backtest.progress} className="h-1 w-16" />
-                                <span className="text-xs text-muted-foreground">{backtest.progress}%</span>
+                              <div className="flex flex-col gap-1 w-full max-w-[140px]">
+                                <div className="flex items-center gap-2">
+                                  <div className="relative w-20 h-2 bg-secondary rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-primary transition-all duration-500 ease-out relative overflow-hidden"
+                                      style={{ width: `${Math.max(backtest.progress || 0, 5)}%` }} // Minimum 5% visible
+                                    >
+                                      <div className="absolute inset-0 bg-white/30 w-full h-full animate-[shimmer_2s_infinite] -skew-x-12" style={{ transform: 'translateX(-100%)' }}></div>
+                                    </div>
+                                  </div>
+                                  <span className="text-xs font-mono text-muted-foreground">{backtest.progress}%</span>
+                                </div>
+                                <span className="text-[10px] text-muted-foreground/80 truncate w-full" title={backtest.statusMessage || "Processing..."}>
+                                  {backtest.statusMessage || (backtest.progress === 0 ? "Initializing..." : "Running...")}
+                                </span>
                               </div>
                             )}
                           </div>
@@ -718,17 +830,16 @@ export default function Backtest() {
                                 <Square className="h-4 w-4" />
                               </Button>
                             )}
-                            {backtest.status === 'error' && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleDelete(backtest.id)} // can't really retry easily without reforming config
-                                className="h-8 w-8 text-destructive"
-                                title="Delete"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            )}
+                            {/* Delete button - always available for any status */}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDelete(backtest.id)}
+                              className="h-8 w-8 text-destructive hover:text-destructive"
+                              title="Delete"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="icon"

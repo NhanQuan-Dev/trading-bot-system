@@ -22,6 +22,7 @@ class BacktestRunModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index('idx_backtest_runs_strategy', 'strategy_id'),
         Index('idx_backtest_runs_status', 'status'),
         Index('idx_backtest_runs_symbol', 'symbol'),
+        Index('idx_backtest_runs_exchange_connection', 'exchange_connection_id'),
         {'comment': 'Backtest execution runs and progress tracking'}
     )
     
@@ -29,7 +30,16 @@ class BacktestRunModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     strategy_id = Column(UUID(as_uuid=True), ForeignKey('strategies.id', ondelete='CASCADE'), nullable=False)
     
+    # Exchange connection - required for multi-exchange support
+    exchange_connection_id = Column(
+        UUID(as_uuid=True), 
+        ForeignKey('api_connections.id', ondelete='RESTRICT'), 
+        nullable=False,
+        comment="Exchange connection used for candle data"
+    )
+    
     # Configuration
+
     symbol = Column(String(20), nullable=False, comment="Symbol to backtest")
     timeframe = Column(String(10), nullable=False, comment="Candlestick timeframe")
     start_date = Column(Date, nullable=False, comment="Backtest start date")
@@ -40,8 +50,9 @@ class BacktestRunModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Execution state
     status = Column(String(20), nullable=False, default="pending", comment="Execution status")
     progress_percent = Column(Integer, nullable=False, default=0, comment="Progress percentage")
-    start_time = Column(DateTime, nullable=True, comment="Execution start time")
-    end_time = Column(DateTime, nullable=True, comment="Execution end time")
+    status_message = Column(String(200), nullable=True, comment="User-friendly progress message")
+    start_time = Column(DateTime(timezone=True), nullable=True, comment="Execution start time")
+    end_time = Column(DateTime(timezone=True), nullable=True, comment="Execution end time")
     error_message = Column(Text, nullable=True, comment="Error message if failed")
     
     # Results (populated after completion)
@@ -53,9 +64,11 @@ class BacktestRunModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Relationships
     user = relationship("UserModel", foreign_keys=[user_id])
     strategy = relationship("StrategyModel", foreign_keys=[strategy_id])
+    exchange_connection = relationship("APIConnectionModel", foreign_keys=[exchange_connection_id])
     
     # One-to-one relationship with result (access via result attribute)
-    result = relationship("BacktestResultModel", back_populates="run", uselist=False)
+    result = relationship("BacktestResultModel", back_populates="run", uselist=False, cascade="all, delete-orphan")
+
 
 
 class BacktestResultModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -150,8 +163,8 @@ class BacktestTradeModel(Base, UUIDPrimaryKeyMixin):
     quantity = Column(DECIMAL(20, 8), nullable=False)
     
     # Timing
-    entry_time = Column(DateTime, nullable=False)
-    exit_time = Column(DateTime, nullable=False)
+    entry_time = Column(DateTime(timezone=True), nullable=False)
+    exit_time = Column(DateTime(timezone=True), nullable=False)
     duration_seconds = Column(Integer, nullable=True)
     
     # P&L

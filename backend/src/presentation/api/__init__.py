@@ -1,4 +1,4 @@
 """Presentation API package."""
-from .v1 import portfolio_router, connection_router
+from .v1 import connection_router
 
-__all__ = ["portfolio_router", "connection_router"]
+__all__ = ["connection_router"]

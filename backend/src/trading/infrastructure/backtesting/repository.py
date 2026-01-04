@@ -8,7 +8,7 @@ import dataclasses
 from dataclasses import asdict
 from sqlalchemy import select, and_, func, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload, defer
 
 from ...domain.backtesting import (
     BacktestRun,
@@ -45,7 +45,7 @@ class BacktestRepository(IBacktestRepository):
     
     def __init__(self, session: AsyncSession):
         """Initialize repository with database session."""
-        self.session = session
+        self._session = session
     
     def _clamp_decimal(self, value, max_val: float = 999999.9999, min_val: float = -999999.9999) -> Decimal:
         """Clamp decimal value to prevent DECIMAL(10,4) overflow.
@@ -66,10 +66,14 @@ class BacktestRepository(IBacktestRepository):
             return Decimal("0")
     
     async def save(self, backtest: BacktestRun) -> BacktestRun:
-        """Save or update backtest run."""
+        """Save or update backtest run.
+        
+        Note: If backtest was deleted (existing=None) but status is not PENDING,
+        this is likely a progress update for a deleted backtest - skip silently.
+        """
         
         # Check if already exists
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(BacktestRunModel).where(BacktestRunModel.id == backtest.id)
         )
         existing = result.scalar_one_or_none()
@@ -78,6 +82,7 @@ class BacktestRepository(IBacktestRepository):
             # Update existing
             existing.status = backtest.status
             existing.progress_percent = backtest.progress_percent
+            existing.status_message = backtest.status_message  # NEW
             existing.start_time = backtest.started_at
             existing.end_time = backtest.completed_at
             existing.final_equity = backtest.final_equity
@@ -86,11 +91,22 @@ class BacktestRepository(IBacktestRepository):
             existing.total_return = backtest.total_return
             existing.error_message = backtest.error_message
         else:
-            # Create new
+            # Record doesn't exist - check if this is a new create or update to deleted record
+            # Only create if status is PENDING (brand new backtest)
+            # If status is RUNNING/COMPLETED/FAILED, backtest was likely deleted - skip
+            from ...domain.backtesting import BacktestStatus
+            
+            if backtest.status != BacktestStatus.PENDING and str(backtest.status).lower() != 'pending':
+                # This is likely an update to a deleted backtest - skip silently
+                logger.warning(f"Skipping save for deleted backtest {backtest.id} (status: {backtest.status})")
+                return backtest
+            
+            # Create new (initial save)
             model = BacktestRunModel(
                 id=backtest.id,
                 user_id=backtest.user_id,
                 strategy_id=backtest.strategy_id,
+                exchange_connection_id=backtest.exchange_connection_id,
                 symbol=backtest.symbol,
                 timeframe=backtest.timeframe,
                 start_date=backtest.start_date,
@@ -99,6 +115,7 @@ class BacktestRepository(IBacktestRepository):
                 config=_convert_decimals(asdict(backtest.config)),
                 status=backtest.status,
                 progress_percent=backtest.progress_percent,
+                status_message=backtest.status_message,  # NEW
                 start_time=backtest.started_at,
                 end_time=backtest.completed_at,
                 final_equity=backtest.final_equity,
@@ -107,7 +124,7 @@ class BacktestRepository(IBacktestRepository):
                 total_return=backtest.total_return,
                 error_message=backtest.error_message,
             )
-            self.session.add(model)
+            self._session.add(model)
         
         # Save results if available
         if backtest.results:
@@ -119,16 +136,16 @@ class BacktestRepository(IBacktestRepository):
                 existing.total_trades = backtest.results.total_trades
                 existing.win_rate = backtest.results.win_rate
                 existing.total_return = backtest.results.total_return
-            elif self.session.new:
+            elif self._session.new:
                 # If we just added the model (it's new), update it
-                for obj in self.session.new:
+                for obj in self._session.new:
                     if isinstance(obj, BacktestRunModel) and obj.id == backtest.id:
                         obj.final_equity = backtest.results.final_equity
                         obj.total_trades = backtest.results.total_trades
                         obj.win_rate = backtest.results.win_rate
                         obj.total_return = backtest.results.total_return
         
-        await self.session.commit()
+        await self._session.commit()
         return backtest
     
     async def _save_results(self, backtest: BacktestRun) -> None:
@@ -141,7 +158,7 @@ class BacktestRepository(IBacktestRepository):
         result_query = select(BacktestResultModel).where(
             BacktestResultModel.backtest_run_id == backtest.id
         )
-        res = await self.session.execute(result_query)
+        res = await self._session.execute(result_query)
         result_model = res.scalar_one_or_none()
         
         # Helper to serialize JSON fields safely
@@ -239,13 +256,13 @@ class BacktestRepository(IBacktestRepository):
                 result_model.cagr = self._clamp_decimal(metrics.compound_annual_growth_rate)
                 result_model.volatility = self._clamp_decimal(metrics.volatility)
             
-            self.session.add(result_model)
-            await self.session.flush() # Get ID
+            self._session.add(result_model)
+            await self._session.flush() # Get ID
             
         # Save individual trades
         # First delete existing trades to avoid duplicates/updates complexity
         if result_model.id:
-            await self.session.execute(
+            await self._session.execute(
                 delete(BacktestTradeModel).where(BacktestTradeModel.result_id == result_model.id)
             )
             
@@ -267,14 +284,16 @@ class BacktestRepository(IBacktestRepository):
                 net_pnl=trade.net_pnl,
                 pnl_percent=trade.pnl_percent
             )
-            self.session.add(trade_model)
+            self._session.add(trade_model)
     
     async def get_by_id(self, backtest_id: UUID) -> Optional[BacktestRun]:
         """Get backtest by ID."""
         
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(selectinload(BacktestRunModel.result))
+            .options(selectinload(BacktestRunModel.exchange_connection))
             .where(BacktestRunModel.id == backtest_id)
         )
         model = result.scalar_one_or_none()
@@ -292,9 +311,17 @@ class BacktestRepository(IBacktestRepository):
     ) -> List[BacktestRun]:
         """Get backtests for user."""
         
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(
+                joinedload(BacktestRunModel.result)
+                .defer(BacktestResultModel.equity_curve)
+                .defer(BacktestResultModel.trades)
+                .defer(BacktestResultModel.monthly_returns)
+                .defer(BacktestResultModel.drawdowns)
+            )
+            .options(selectinload(BacktestRunModel.exchange_connection))
             .where(BacktestRunModel.user_id == user_id)
             .order_by(BacktestRunModel.created_at.desc())
             .limit(limit)
@@ -311,9 +338,16 @@ class BacktestRepository(IBacktestRepository):
     ) -> List[BacktestRun]:
         """Get backtests for strategy."""
         
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(
+                joinedload(BacktestRunModel.result)
+                .defer(BacktestResultModel.equity_curve)
+                .defer(BacktestResultModel.trades)
+                .defer(BacktestResultModel.monthly_returns)
+                .defer(BacktestResultModel.drawdowns)
+            )
             .where(BacktestRunModel.strategy_id == strategy_id)
             .order_by(BacktestRunModel.created_at.desc())
             .limit(limit)
@@ -329,9 +363,16 @@ class BacktestRepository(IBacktestRepository):
     ) -> List[BacktestRun]:
         """Get backtests for symbol."""
         
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(
+                joinedload(BacktestRunModel.result)
+                .defer(BacktestResultModel.equity_curve)
+                .defer(BacktestResultModel.trades)
+                .defer(BacktestResultModel.monthly_returns)
+                .defer(BacktestResultModel.drawdowns)
+            )
             .where(BacktestRunModel.symbol == symbol)
             .order_by(BacktestRunModel.created_at.desc())
             .limit(limit)
@@ -343,7 +384,7 @@ class BacktestRepository(IBacktestRepository):
     async def get_results(self, backtest_id: UUID) -> Optional[Dict]:
         """Get detailed backtest results."""
         stmt = select(BacktestResultModel).where(BacktestResultModel.backtest_run_id == backtest_id)
-        result = await self.session.execute(stmt)
+        result = await self._session.execute(stmt)
         model = result.scalar_one_or_none()
         
         if not model:
@@ -392,24 +433,31 @@ class BacktestRepository(IBacktestRepository):
         }
     
     async def delete(self, backtest_id: UUID) -> bool:
-        """Delete backtest."""
+        """Delete backtest and all related data."""
         
-        result = await self.session.execute(
+        print(f"DEBUG [Repository]: Deleting backtest {backtest_id}")
+        
+        result = await self._session.execute(
             select(BacktestRunModel).where(BacktestRunModel.id == backtest_id)
         )
         model = result.scalar_one_or_none()
         
         if not model:
+            print(f"DEBUG [Repository]: Backtest {backtest_id} not found - already deleted?")
             return False
         
-        await self.session.delete(model)
-        await self.session.commit()
+        print(f"DEBUG [Repository]: Found backtest {backtest_id}, status: {model.status}, deleting...")
+        
+        await self._session.delete(model)
+        await self._session.commit()
+        
+        print(f"DEBUG [Repository]: Backtest {backtest_id} DELETED and COMMITTED")
         return True
     
     async def count_by_user(self, user_id: UUID) -> int:
         """Count backtests for user."""
         
-        result = await self.session.execute(
+        result = await self._session.execute(
             select(func.count()).select_from(BacktestRunModel).where(BacktestRunModel.user_id == user_id)
         )
         return result.scalar_one()
@@ -417,14 +465,14 @@ class BacktestRepository(IBacktestRepository):
     async def get_running_backtests(self, user_id: Optional[UUID] = None) -> List[BacktestRun]:
         """Get currently running backtests."""
         
-        query = select(BacktestRunModel).options(selectinload(BacktestRunModel.strategy)).where(
+        query = select(BacktestRunModel).options(selectinload(BacktestRunModel.strategy)).options(selectinload(BacktestRunModel.result)).where(
             BacktestRunModel.status.in_([BacktestStatus.PENDING, BacktestStatus.RUNNING])
         )
         
         if user_id:
             query = query.where(BacktestRunModel.user_id == user_id)
         
-        result = await self.session.execute(query)
+        result = await self._session.execute(query)
         models = result.scalars().all()
         
         return [self._model_to_entity(m) for m in models]
@@ -436,11 +484,23 @@ class BacktestRepository(IBacktestRepository):
         
         config = BacktestConfig(**model.config)
         
+        # Extract performance metrics from result if available
+        profit_factor = None
+        max_drawdown = None
+        sharpe_ratio = None
+        
+        if model.result:
+            profit_factor = model.result.profit_factor
+            max_drawdown = model.result.max_drawdown
+            sharpe_ratio = model.result.sharpe_ratio
+        
         return BacktestRun(
             id=model.id,
             user_id=model.user_id,
             strategy_id=model.strategy_id,
             strategy_name=model.strategy.name if model.strategy else None,
+            exchange_connection_id=model.exchange_connection_id,
+            exchange_name=model.exchange_connection.name if model.exchange_connection else None,
             symbol=model.symbol,
             timeframe=model.timeframe,
             config=config,
@@ -454,7 +514,11 @@ class BacktestRepository(IBacktestRepository):
             total_trades=model.total_trades,
             win_rate=model.win_rate,
             total_return=model.total_return,
+            profit_factor=profit_factor,
+            max_drawdown=max_drawdown,
+            sharpe_ratio=sharpe_ratio,
             error_message=model.error_message,
+            status_message=model.status_message,  # NEW
         )
 
     # ===== PHASE 3 METHODS =====
@@ -475,7 +539,7 @@ class BacktestRepository(IBacktestRepository):
         result_query = select(BacktestResultModel.id).where(
             BacktestResultModel.backtest_run_id == backtest_id
         )
-        result_result = await self.session.execute(result_query)
+        result_result = await self._session.execute(result_query)
         result_id = result_result.scalar_one_or_none()
         
         if not result_id:
@@ -506,8 +570,13 @@ class BacktestRepository(IBacktestRepository):
         query = query.order_by(desc(BacktestTradeModel.entry_time))
         query = query.limit(limit).offset((page - 1) * limit)
         
-        result = await self.session.execute(query)
-        return result.scalars().all()
+        result = await self._session.execute(query)
+        trades = result.scalars().all()
+        
+        if trades:
+            logger.info(f"DEBUG REPO: First trade direction raw: '{trades[0].direction}'")
+            
+        return trades
     
     async def count_backtest_trades(
         self,
@@ -523,7 +592,7 @@ class BacktestRepository(IBacktestRepository):
         result_query = select(BacktestResultModel.id).where(
             BacktestResultModel.backtest_run_id == backtest_id
         )
-        result_result = await self.session.execute(result_query)
+        result_result = await self._session.execute(result_query)
         result_id = result_result.scalar_one_or_none()
         
         if not result_id:
@@ -547,7 +616,7 @@ class BacktestRepository(IBacktestRepository):
         if max_pnl is not None:
             query = query.where(BacktestTradeModel.net_pnl <= max_pnl)
         
-        result = await self.session.execute(query)
+        result = await self._session.execute(query)
         return result.scalar_one()
     
     async def get_equity_curve(self, backtest_id: UUID) -> List[dict]:
@@ -557,7 +626,7 @@ class BacktestRepository(IBacktestRepository):
         result_query = select(BacktestResultModel).where(
             BacktestResultModel.backtest_run_id == backtest_id
         )
-        result_result = await self.session.execute(result_query)
+        result_result = await self._session.execute(result_query)
         backtest_result = result_result.scalar_one_or_none()
         
         if not backtest_result or not backtest_result.equity_curve:
@@ -576,7 +645,7 @@ class BacktestRepository(IBacktestRepository):
             mock_point = type('EquityPoint', (), {
                 'timestamp': point.get('timestamp'),
                 'equity': point.get('equity'),
-                'drawdown_pct': point.get('drawdown', 0.0)
+                'drawdown_pct': point.get('drawdown_percent', 0.0) or point.get('drawdown', 0.0)
             })()
             equity_points.append(mock_point)
         
@@ -586,7 +655,19 @@ class BacktestRepository(IBacktestRepository):
         """Get position timeline data for backtest."""
         
         # Get trades and calculate position timeline
-        trades = await self.get_backtest_trades(backtest_id, page=1, limit=10000)
+        # CRITICAL FIX: Fetch ALL trades using pagination (was limited to 10,000)
+        all_trades = []
+        page = 1
+        batch_size = 1000
+        
+        while True:
+            trades_batch = await self.get_backtest_trades(backtest_id, page=page, limit=batch_size)
+            if not trades_batch:
+                break
+            all_trades.extend(trades_batch)
+            page += 1
+        
+        trades = all_trades
         
         if not trades:
             return []

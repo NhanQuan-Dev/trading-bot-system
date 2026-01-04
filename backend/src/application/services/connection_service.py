@@ -18,6 +18,8 @@ from sqlalchemy import select, and_, update
 from sqlalchemy.orm import selectinload
 import uuid
 import asyncio
+import os
+from cryptography.fernet import Fernet
 
 from trading.infrastructure.persistence.models.core_models import APIConnectionModel, ExchangeModel
 
@@ -28,6 +30,29 @@ class ConnectionService:
     def __init__(self, session: AsyncSession):
         # Khởi tạo với DB session để truy cập dữ liệu
         self._session = session
+        
+    def _decrypt(self, encrypted_value: str) -> str:
+        """Decrypt a string value."""
+        if not encrypted_value:
+            return ""
+        encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        if not encryption_key:
+            return ""
+        try:
+            cipher = Fernet(encryption_key.encode())
+            return cipher.decrypt(encrypted_value.encode()).decode()
+        except Exception:
+            return ""
+
+    def _encrypt(self, value: str) -> str:
+        """Encrypt a string value."""
+        if not value:
+            return ""
+        encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        if not encryption_key:
+            raise ValueError("ENCRYPTION_KEY environment variable not set")
+        cipher = Fernet(encryption_key.encode())
+        return cipher.encrypt(value.encode()).decode()
     
     async def get_all_connections(self, user_id: str) -> List[Dict[str, Any]]:
         """
@@ -56,8 +81,9 @@ class ConnectionService:
         for conn in connections:
             # Ẩn API key, chỉ show 4 ký tự cuối
             masked_key = ""
-            if conn.api_key:
-                masked_key = "*" * (len(conn.api_key) - 4) + conn.api_key[-4:]
+            if conn.api_key_encrypted:
+                raw_key = self._decrypt(conn.api_key_encrypted)
+                masked_key = "*" * max(0, len(raw_key) - 4) + raw_key[-4:] if raw_key else "****"
             
             connections_data.append({
                 "id": str(conn.id),
@@ -65,9 +91,9 @@ class ConnectionService:
                 "exchange_name": conn.exchange.name if conn.exchange else "Unknown",
                 "name": conn.name,
                 "api_key": masked_key,
-                "status": conn.status,
+                "status": "active" if conn.is_active else "inactive",
                 "is_testnet": conn.is_testnet,
-                "created_at": conn.created_at.isoformat(),
+                "created_at": conn.created_at.isoformat() if conn.created_at else None,
                 "last_used_at": conn.last_used_at.isoformat() if conn.last_used_at else None
             })
         
@@ -112,9 +138,9 @@ class ConnectionService:
             user_id=uuid.UUID(user_id),
             exchange_id=exchange_id,
             name=name or f"{exchange.name} Connection",
-            api_key=api_key,
-            api_secret=api_secret,
-            api_passphrase=api_passphrase,
+            api_key_encrypted=self._encrypt(api_key),
+            secret_key_encrypted=self._encrypt(api_secret),
+            passphrase_encrypted=self._encrypt(api_passphrase) if api_passphrase else None,
             is_testnet=is_testnet,
             status="inactive",  # Bắt đầu inactive, cần test
             created_at=datetime.utcnow(),
@@ -183,11 +209,11 @@ class ConnectionService:
         if name is not None:
             connection.name = name
         if api_key is not None:
-            connection.api_key = api_key
+            connection.api_key_encrypted = self._encrypt(api_key)
         if api_secret is not None:
-            connection.api_secret = api_secret
+            connection.secret_key_encrypted = self._encrypt(api_secret)
         if api_passphrase is not None:
-            connection.api_passphrase = api_passphrase
+            connection.passphrase_encrypted = self._encrypt(api_passphrase)
         if status is not None:
             connection.status = status
         
@@ -197,7 +223,8 @@ class ConnectionService:
         await self._session.refresh(connection)
         
         # Mask API key
-        masked_key = "*" * (len(connection.api_key) - 4) + connection.api_key[-4:] if connection.api_key else ""
+        raw_key = api_key or (self._decrypt(connection.api_key_encrypted) if connection.api_key_encrypted else "")
+        masked_key = "*" * max(0, len(raw_key) - 4) + raw_key[-4:] if raw_key else "****"
         
         return {
             "id": str(connection.id),
@@ -299,55 +326,58 @@ class ConnectionService:
         
         # Try to connect and fetch balance (with timeout)
         try:
-            # Import ccxt here to avoid circular imports
-            import ccxt.async_support as ccxt
-            
-            # Create exchange instance
-            exchange_class = getattr(ccxt, exchange.name.lower(), None)
-            if not exchange_class:
+            # Use direct Binance API adapter instead of CCXT
+            if exchange.code == "BINANCE" or "BINANCE" in exchange.name.upper():
+                from src.trading.infrastructure.exchange.binance_adapter import BinanceAdapter
+                
+                # Select base URL based on testnet flag
+                base_url = "https://demo-fapi.binance.com" if is_testnet else "https://fapi.binance.com"
+                
+                adapter = BinanceAdapter(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    base_url=base_url,
+                    testnet=is_testnet
+                )
+                
+                # Test connectivity first
+                is_connected = await asyncio.wait_for(
+                    adapter.test_connectivity(),
+                    timeout=10.0
+                )
+                
+                if not is_connected:
+                    await adapter.close()
+                    return {
+                        "success": False,
+                        "error": "Failed to connect to Binance API"
+                    }
+                
+                # Get account info
+                account_info = await asyncio.wait_for(
+                    adapter.get_account_info(),
+                    timeout=10.0
+                )
+                
+                await adapter.close()
+                
+                # Extract balances
+                total_balance = {
+                    b.asset: float(b.free + b.locked)
+                    for b in account_info.balances
+                    if (b.free + b.locked) > 0
+                }
+                
+                return {
+                    "success": True,
+                    "balance": total_balance,
+                    "message": f"Successfully connected to Binance {'Testnet' if is_testnet else 'Mainnet'}"
+                }
+            else:
                 return {
                     "success": False,
-                    "error": f"Exchange {exchange.name} not supported by CCXT"
+                    "error": f"Exchange {exchange.name} is not supported yet"
                 }
-            
-            # Configure exchange
-            config = {
-                "apiKey": api_key,
-                "secret": api_secret,
-                "enableRateLimit": True,
-                "timeout": 10000,  # 10 seconds
-            }
-            
-            if api_passphrase:
-                config["password"] = api_passphrase
-            
-            if is_testnet:
-                config["sandbox"] = True
-            
-            exchange_instance = exchange_class(config)
-            
-            # Test connection by fetching balance
-            balance = await asyncio.wait_for(
-                exchange_instance.fetch_balance(),
-                timeout=10.0
-            )
-            
-            await exchange_instance.close()
-            
-            # Extract total balances
-            total_balance = {}
-            if "total" in balance:
-                total_balance = {
-                    asset: amount 
-                    for asset, amount in balance["total"].items() 
-                    if amount > 0
-                }
-            
-            return {
-                "success": True,
-                "balance": total_balance,
-                "message": f"Successfully connected to {exchange.name}"
-            }
             
         except asyncio.TimeoutError:
             return {
@@ -386,12 +416,17 @@ class ConnectionService:
         if not connection:
             raise ValueError(f"Connection {connection_id} not found")
         
+        # Decrypt keys
+        api_key = self._decrypt(connection.api_key_encrypted)
+        secret_key = self._decrypt(connection.secret_key_encrypted)
+        passphrase = self._decrypt(connection.passphrase_encrypted) if connection.passphrase_encrypted else None
+        
         # Test connection
         test_result = await self.test_connection(
             exchange_id=connection.exchange_id,
-            api_key=connection.api_key,
-            api_secret=connection.api_secret,
-            api_passphrase=connection.api_passphrase,
+            api_key=api_key,
+            api_secret=secret_key,
+            api_passphrase=passphrase,
             is_testnet=connection.is_testnet
         )
         
@@ -403,8 +438,8 @@ class ConnectionService:
         
         await self._session.commit()
         
-        # Mask API key
-        masked_key = "*" * (len(connection.api_key) - 4) + connection.api_key[-4:]
+        # Mask API key (using decrypted key)
+        masked_key = "*" * max(0, len(api_key) - 4) + api_key[-4:] if api_key else "****"
         
         return {
             "id": str(connection.id),
@@ -414,4 +449,39 @@ class ConnectionService:
             "status": connection.status,
             "test_result": test_result,
             "updated_at": connection.updated_at.isoformat()
+        }
+
+    async def get_connection_credentials(self, connection_id: str, user_id: str) -> Dict[str, Any]:
+        """
+        Get decrypted connection credentials for internal use.
+        
+        Args:
+            connection_id: Connection UUID
+            user_id: User UUID
+            
+        Returns:
+            Dict containing api_key, api_secret, api_passphrase, is_testnet, exchange_code
+        """
+        stmt = select(APIConnectionModel).where(
+            and_(
+                APIConnectionModel.id == uuid.UUID(connection_id),
+                APIConnectionModel.user_id == user_id,
+                APIConnectionModel.deleted_at.is_(None)
+            )
+        ).options(selectinload(APIConnectionModel.exchange))
+        
+        result = await self._session.execute(stmt)
+        connection = result.scalar_one_or_none()
+        
+        if not connection:
+            raise ValueError(f"Connection {connection_id} not found")
+            
+        return {
+            "api_key": self._decrypt(connection.api_key_encrypted),
+            "api_secret": self._decrypt(connection.secret_key_encrypted),
+            "api_passphrase": self._decrypt(connection.passphrase_encrypted) if connection.passphrase_encrypted else None,
+            "is_testnet": connection.is_testnet,
+            "exchange_code": connection.exchange.code if connection.exchange else None,
+            "exchange_name": connection.exchange.name if connection.exchange else None,
+            "exchange_id": connection.exchange_id
         }

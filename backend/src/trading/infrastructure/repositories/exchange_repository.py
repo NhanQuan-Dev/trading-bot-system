@@ -233,7 +233,7 @@ class ExchangeRepository(IExchangeRepository):
             ),
             is_testnet=is_testnet,
             is_active=model.is_active,
-            status=ConnectionStatus.DISCONNECTED,  # TODO: Track status in database or cache
+            status=ConnectionStatus.CONNECTED if model.is_active else ConnectionStatus.DISCONNECTED,
             last_used_at=model.last_used_at,
             created_at=model.created_at,
         )

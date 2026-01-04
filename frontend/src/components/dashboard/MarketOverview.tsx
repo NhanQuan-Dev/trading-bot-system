@@ -2,15 +2,43 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const marketData = [
-  { symbol: 'BTC/USDT', price: 67845.20, change: 2.45, volume: '1.2B' },
-  { symbol: 'ETH/USDT', price: 3521.80, change: 1.82, volume: '845M' },
-  { symbol: 'SOL/USDT', price: 148.65, change: -3.21, volume: '425M' },
-  { symbol: 'DOGE/USDT', price: 0.1245, change: 5.67, volume: '312M' },
-  { symbol: 'XRP/USDT', price: 0.5234, change: -0.89, volume: '198M' },
-];
+// Market data removed - using real API
+
+import { useEffect, useState } from 'react';
 
 export function MarketOverview() {
+  const [marketData, setMarketData] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const token = localStorage.getItem('access_token');
+        const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+        const res = await fetch('/api/v1/market-data/overview?limit=5', { headers });
+        if (res.ok) {
+          const data = await res.json();
+          // Use highest volume items
+          const items = data.highest_volume || [];
+          setMarketData(items.map((item: any) => ({
+            symbol: item.symbol,
+            price: item.last_price || 0,
+            change: item.price_change_percent_24h || 0,
+            volume: formatVolume(item.volume_24h || 0)
+          })));
+        }
+      } catch (error) {
+        console.error('Failed to fetch market overview');
+      }
+    };
+    fetchData();
+  }, []);
+
+  const formatVolume = (vol: number) => {
+    if (vol >= 1e9) return (vol / 1e9).toFixed(1) + 'B';
+    if (vol >= 1e6) return (vol / 1e6).toFixed(1) + 'M';
+    if (vol >= 1e3) return (vol / 1e3).toFixed(1) + 'K';
+    return vol.toFixed(0);
+  };
   return (
     <Card className="border-border bg-card">
       <CardHeader className="pb-4">
@@ -20,7 +48,7 @@ export function MarketOverview() {
         <div className="space-y-3">
           {marketData.map((item) => {
             const isPositive = item.change >= 0;
-            
+
             return (
               <div
                 key={item.symbol}
@@ -35,7 +63,7 @@ export function MarketOverview() {
                     <p className="text-xs text-muted-foreground">Vol: {item.volume}</p>
                   </div>
                 </div>
-                
+
                 <div className="text-right">
                   <p className="font-mono text-sm font-medium text-foreground">
                     ${item.price.toLocaleString()}

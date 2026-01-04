@@ -21,7 +21,8 @@ class BotModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
         Index('idx_bots_api_connection_id', 'exchange_connection_id'),
         Index('idx_bots_start_time', 'start_time'),
         Index('idx_bots_deleted_at', 'deleted_at'),
-        CheckConstraint("status IN ('ACTIVE', 'PAUSED', 'STOPPED', 'ERROR', 'STARTING', 'STOPPING')", name='ck_bots_status'),
+        Index('idx_bots_total_pnl', 'total_pnl'),  # New: for sorting by P&L
+        CheckConstraint("status IN ('RUNNING', 'PAUSED', 'ERROR')", name='ck_bots_status'),
         CheckConstraint("risk_level IN ('CONSERVATIVE', 'MODERATE', 'AGGRESSIVE', 'EXTREME')", name='ck_bots_risk_level'),
         {'comment': 'Trading bots with strategy execution'}
     )
@@ -32,7 +33,7 @@ class BotModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     
     name = Column(String(100), nullable=False, comment="Bot name (user-defined)")
     description = Column(String(500), nullable=True, comment="Bot description")
-    status = Column(String(20), nullable=False, default="STOPPED", comment="Bot status")
+    status = Column(String(20), nullable=False, default="PAUSED", comment="Bot status")
     risk_level = Column(String(20), nullable=False, default="MODERATE", comment="Risk level")
     
     # Configuration (JSONB)
@@ -50,6 +51,18 @@ class BotModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     active_orders = Column(JSONType, nullable=False, default=[], comment="Active order IDs JSON array")
     daily_pnl = Column(DECIMAL(20, 8), nullable=False, default=Decimal("0"), comment="Daily P&L")
     total_runtime_seconds = Column(Integer, nullable=False, default=0, comment="Total runtime in seconds")
+    
+    # === NEW: Cumulative Bot Stats (updated on each trade close) ===
+    total_pnl = Column(DECIMAL(20, 8), nullable=False, default=Decimal("0"), comment="Total realized P&L from all closed trades")
+    total_trades = Column(Integer, nullable=False, default=0, comment="Total number of closed trades")
+    winning_trades = Column(Integer, nullable=False, default=0, comment="Number of winning trades (P&L > 0)")
+    losing_trades = Column(Integer, nullable=False, default=0, comment="Number of losing trades (P&L < 0)")
+    
+    # === NEW: Streak Tracking ===
+    current_win_streak = Column(Integer, nullable=False, default=0, comment="Current consecutive winning trades")
+    current_loss_streak = Column(Integer, nullable=False, default=0, comment="Current consecutive losing trades")
+    max_win_streak = Column(Integer, nullable=False, default=0, comment="Maximum win streak ever achieved")
+    max_loss_streak = Column(Integer, nullable=False, default=0, comment="Maximum loss streak ever experienced")
     
     # Metadata
     meta_data = Column(JSONType, nullable=False, default={}, comment="Additional metadata JSON")

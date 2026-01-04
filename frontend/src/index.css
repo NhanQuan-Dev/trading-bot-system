@@ -96,6 +96,61 @@ All colors MUST be HSL.
     --spacing: 0.25rem;
   }
 
+  @keyframes shard-burst {
+    0% {
+      transform: translate(0, 0) scale(0.5);
+      opacity: 0.8;
+    }
+
+    100% {
+      transform: translate(var(--tx), var(--ty)) scale(1);
+      opacity: 0;
+    }
+  }
+
+  .animate-shard {
+    will-change: transform, opacity;
+    transform: translateZ(0);
+    /* Force GPU */
+  }
+
+  @keyframes central-flash {
+    0% {
+      transform: translate(-50%, -50%) scale(0.5);
+      opacity: 0.8;
+    }
+
+    50% {
+      transform: translate(-50%, -50%) scale(2.5);
+      opacity: 0;
+    }
+
+    100% {
+      transform: translate(-50%, -50%) scale(2.5);
+      opacity: 0;
+    }
+  }
+
+  @keyframes flash-trade {
+
+    0%,
+    100% {
+      background-color: transparent;
+    }
+
+    50% {
+      background-color: rgba(255, 255, 255, 0.1);
+    }
+  }
+
+  .animate-central-flash {
+    animation: central-flash 5500ms ease-out forwards;
+  }
+
+  .animate-flash-trade {
+    animation: flash-trade 500ms ease-in-out;
+  }
+
   .dark {
     --background: 220 20% 7%;
     --foreground: 210 20% 98%;
@@ -139,7 +194,7 @@ All colors MUST be HSL.
     --chart-3: 199 89% 48%;
     --chart-4: 280 65% 60%;
     --chart-5: 0 72% 55%;
-    
+
     --sidebar: 220 18% 10%;
 
     --success: 142 76% 46%;
@@ -196,7 +251,7 @@ All colors MUST be HSL.
     --chart-3: 199 89% 48%;
     --chart-4: 280 65% 60%;
     --chart-5: 0 72% 55%;
-    
+
     --sidebar: 220 18% 10%;
 
     --success: 142 76% 46%;

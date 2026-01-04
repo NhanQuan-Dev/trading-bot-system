@@ -371,7 +371,7 @@ class RiskMonitoringService:
                 update(BotModel)
                 .where(BotModel.id == bot.id)
                 .values(
-                    status=BotStatus.STOPPED,
+                    status=BotStatus.PAUSED,
                     updated_at=datetime.utcnow()
                 )
             )

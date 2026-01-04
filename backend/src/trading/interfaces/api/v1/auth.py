@@ -70,6 +70,12 @@ async def register(
     )
 
 
+
+import logging
+logger = logging.getLogger(__name__)
+
+# ...
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     request: LoginRequest,

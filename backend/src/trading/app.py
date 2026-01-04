@@ -34,15 +34,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Error starting WebSocket services: {e}")
 
+    # Job Services
     try:
         await job_service.start()
         register_default_scheduled_tasks()
+        
+        # Register background job handlers
+        from .infrastructure.jobs.job_worker import JobWorker
+        from .infrastructure.jobs.fetch_missing_candles_job import FetchMissingCandlesJobV2
+        from .infrastructure.exchange.binance_adapter import BinanceAdapter
+
+        # Use public adapter for background fetching (empty keys for public API)
+        adapter = BinanceAdapter(api_key="", api_secret="") 
+        handler = FetchMissingCandlesJobV2(adapter=adapter, candle_repo=None)
+        
+        JobWorker.register_handler(
+            'fetch_missing_candles',
+            handler.execute
+        )
+        logger.info("Registered fetch_missing_candles handler")
+        
         logger.info("Job services started successfully")
     except Exception as e:
         logger.error(f"Error starting job services: {e}")
 
     # Create tables if they don't exist
-    from .infrastructure.persistence.database import async_engine, Base
+    from .infrastructure.persistence.database import async_engine, Base, get_db_context
     from .infrastructure.persistence import models  # Ensure models are imported
     
     try:
@@ -52,8 +69,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Error creating database tables: {e}")
 
+    # Initialize Bot Manager
+    from .application.services.bot_manager import init_bot_manager, get_bot_manager
+    try:
+        # Pass the database context (async_sessionmaker) to the manager
+        from .infrastructure.persistence.database import get_db_context
+        # get_db_context is context manager, but we need the factory.
+        # Actually async_sessionmaker is usually provided by database module directly
+        from .infrastructure.persistence.database import AsyncSessionLocal
+        init_bot_manager(AsyncSessionLocal)
+        logger.info("Bot Manager initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing Bot Manager: {e}")
+
     # Seed initial data
-    from .infrastructure.persistence.database import get_db_context
     from .infrastructure.persistence.seed_exchanges import seed_exchanges
     from .infrastructure.persistence.seed_users import seed_users
     from .infrastructure.persistence.seed_strategies import seed_strategies
@@ -68,6 +97,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Error seeding database: {e}")
 
     yield
+
+    # Stop Bot Manager (Graceful Shutdown)
+    try:
+        bot_manager = get_bot_manager()
+        await bot_manager.stop_all_bots()
+        logger.info("Bot Manager stopped successfully")
+    except Exception as e:
+        logger.error(f"Error stopping Bot Manager: {e}")
 
     try:
         await websocket_service.stop()
@@ -227,20 +264,19 @@ def create_app() -> FastAPI:
     from .presentation.controllers.websocket_controller import router as websocket_router
 
     # Import Phase 1 & 2 Integration API routers
-    # TODO: Re-enable once models are available
-    # import sys
-    # sys.path.insert(0, str(settings.BASE_DIR))
+    import sys
+    sys.path.insert(0, str(settings.BASE_DIR))
+    from presentation.api.v1.connection_controller import router as connection_router
     # from presentation.api.v1.portfolio_controller import router as portfolio_router
-    # from presentation.api.v1.connection_controller import router as connection_router
     # from presentation.api.v1.performance_controller import router as performance_router
     # from presentation.api.v1.risk_controller import router as risk_router
 
     app.include_router(api_v1_router)
     app.include_router(websocket_router)
-
-    # Include Phase 1 & 2 Integration APIs - disabled for now
+    
+    # Include Phase 1 & 2 Integration APIs
+    app.include_router(connection_router)  # Enabled for bot details
     # app.include_router(portfolio_router)
-    # app.include_router(connection_router)  
     # app.include_router(performance_router)
     # app.include_router(risk_router)
 

@@ -42,6 +42,12 @@ class UpdatePreferencesRequest(BaseModel):
     preferences: Dict[str, Any] = Field(..., description="User preferences")
 
 
+
+import logging
+logger = logging.getLogger(__name__)
+
+# ...
+
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
     current_user: User = Depends(get_current_active_user),

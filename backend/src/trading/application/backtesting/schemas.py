@@ -77,6 +77,7 @@ class RunBacktestRequest(BaseModel):
     """Request to run a backtest."""
     
     strategy_id: UUID = Field(..., description="Strategy to test")
+    exchange_connection_id: UUID = Field(..., description="Exchange connection to use for candle data")
     config: BacktestConfigRequest = Field(..., description="Backtest configuration")
     strategy_code: Optional[str] = Field(
         default=None,
@@ -92,6 +93,11 @@ class BacktestRunResponse(BaseModel):
     user_id: UUID
     strategy_id: UUID
     strategy_name: Optional[str] = None
+    
+    # Exchange connection
+    exchange_connection_id: UUID
+    exchange_name: Optional[str] = None
+    
     symbol: str
     timeframe: str
     start_date: datetime
@@ -99,6 +105,7 @@ class BacktestRunResponse(BaseModel):
     initial_capital: Decimal
     status: BacktestStatus
     progress_percent: int
+    status_message: Optional[str] = None  # NEW: User-friendly progress message
     start_time: Optional[datetime]
     end_time: Optional[datetime]
     error_message: Optional[str]
@@ -106,6 +113,12 @@ class BacktestRunResponse(BaseModel):
     total_trades: Optional[int]
     win_rate: Optional[Decimal]
     total_return: Optional[Decimal]
+    
+    # Performance metrics
+    profit_factor: Optional[Decimal] = None
+    max_drawdown: Optional[Decimal] = None
+    sharpe_ratio: Optional[Decimal] = None
+    
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)

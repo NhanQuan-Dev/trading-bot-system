@@ -15,8 +15,11 @@ class StreamType(str, Enum):
     TRADES = "TRADES"
     USER_DATA = "USER_DATA"
     BOT_STATUS = "BOT_STATUS"
+    BOT_STATS = "BOT_STATS"  # NEW: Real-time bot statistics (P&L, win rate, streaks)
     RISK_ALERTS = "RISK_ALERTS"
     ORDER_UPDATES = "ORDER_UPDATES"
+    POSITIONS = "POSITIONS"
+    ORDERS = "ORDERS"
 
 
 class SubscriptionStatus(str, Enum):

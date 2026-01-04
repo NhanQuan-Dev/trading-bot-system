@@ -31,7 +31,9 @@ from ...interfaces.dependencies.providers import (
     get_resume_bot_use_case,
     get_update_bot_config_use_case,
     get_delete_bot_use_case,
+    get_position_service
 )
+from ...application.services.position_service import PositionService
 
 
 router = APIRouter(prefix="/bots", tags=["bots"])
@@ -46,17 +48,19 @@ class CreateBotRequest(BaseModel):
     strategy_id: UUID
     exchange_connection_id: UUID
     symbol: str = Field(..., min_length=1, max_length=20)
-    base_quantity: Decimal = Field(..., gt=0)
-    quote_quantity: Decimal = Field(..., gt=0)
-    max_active_orders: int = Field(..., gt=0, le=100)
-    risk_percentage: Decimal = Field(..., gt=0, le=100)
-    take_profit_percentage: Decimal = Field(..., gt=0)
-    stop_loss_percentage: Decimal = Field(..., gt=0)
+    base_quantity: Optional[Decimal] = Field(None, description="Base asset quantity")
+    quote_quantity: Optional[Decimal] = Field(None, description="Quote asset quantity")
+    max_active_orders: int = Field(10, gt=0, le=100)
+    risk_percentage: Decimal = Field(Decimal("1.0"), gt=0, le=100)
+    take_profit_percentage: Decimal = Field(Decimal("2.0"), gt=0)
+    stop_loss_percentage: Decimal = Field(Decimal("1.0"), gt=0)
     description: Optional[str] = Field(None, max_length=500)
     risk_level: RiskLevel = RiskLevel.MODERATE
     max_daily_loss: Optional[Decimal] = Field(None, gt=0)
     max_drawdown: Optional[Decimal] = Field(None, gt=0)
     strategy_settings: Optional[dict] = None
+    configuration: Optional[dict] = None  # Allow configuration for compatibility
+    bot_type: Optional[str] = None # Allow passing bot type for strategy selection
 
 
 class UpdateBotConfigurationRequest(BaseModel):
@@ -117,6 +121,12 @@ class BotResponse(BaseModel):
     total_fees: Decimal
     net_profit_loss: Decimal
     max_drawdown_actual: Decimal
+    
+    # Streak Tracking
+    current_win_streak: int = 0
+    current_loss_streak: int = 0
+    max_win_streak: int = 0
+    max_loss_streak: int = 0
 
 
 class StopBotRequest(BaseModel):
@@ -161,15 +171,21 @@ def bot_to_response(bot) -> BotResponse:
         max_drawdown=bot.configuration.max_drawdown,
         strategy_settings=bot.configuration.strategy_settings,
         
-        # Performance
-        total_trades=bot.performance.total_trades,
-        winning_trades=bot.performance.winning_trades,
-        losing_trades=bot.performance.losing_trades,
-        win_rate=bot.performance.win_rate,
-        total_profit_loss=bot.performance.total_profit_loss,
+        # Performance (Use recalculated cumulative stats, not stale JSONB)
+        total_trades=bot.total_trades or bot.performance.total_trades,
+        winning_trades=bot.winning_trades or bot.performance.winning_trades,
+        losing_trades=bot.losing_trades or bot.performance.losing_trades,
+        win_rate=((bot.winning_trades / max(bot.total_trades, 1)) * 100) if bot.total_trades else bot.performance.win_rate,
+        total_profit_loss=bot.total_pnl or bot.performance.total_profit_loss,
         total_fees=bot.performance.total_fees,
-        net_profit_loss=bot.performance.net_profit_loss,
+        net_profit_loss=bot.total_pnl or bot.performance.net_profit_loss,
         max_drawdown_actual=bot.performance.max_drawdown,
+        
+        # Streak Tracking
+        current_win_streak=bot.current_win_streak,
+        current_loss_streak=bot.current_loss_streak,
+        max_win_streak=bot.max_win_streak,
+        max_loss_streak=bot.max_loss_streak,
     )
 
 
@@ -180,15 +196,24 @@ async def create_bot(
     create_bot_use_case: CreateBotUseCase = Depends(get_create_bot_use_case),
 ):
     """Create a new bot."""
+    print(f"DEBUG: create_bot payload: {request.model_dump()}")
     try:
+        # Prepare settings and defaults
+        settings = request.strategy_settings or {}
+        if request.bot_type and "strategy_type" not in settings:
+            settings["strategy_type"] = request.bot_type
+            
+        base_qty = request.base_quantity or Decimal(0)
+        quote_qty = request.quote_quantity or Decimal(0)
+        
         bot = await create_bot_use_case.execute(
             user_id=current_user.id,
             name=request.name,
             strategy_id=request.strategy_id,
             exchange_connection_id=request.exchange_connection_id,
             symbol=request.symbol,
-            base_quantity=request.base_quantity,
-            quote_quantity=request.quote_quantity,
+            base_quantity=base_qty,
+            quote_quantity=quote_qty,
             max_active_orders=request.max_active_orders,
             risk_percentage=request.risk_percentage,
             take_profit_percentage=request.take_profit_percentage,
@@ -197,13 +222,15 @@ async def create_bot(
             risk_level=request.risk_level,
             max_daily_loss=request.max_daily_loss,
             max_drawdown=request.max_drawdown,
-            strategy_settings=request.strategy_settings,
+            strategy_settings=settings,
         )
         return bot_to_response(bot)
     
     except DuplicateError as e:
+        print(f"DEBUG: DuplicateError: {e}")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    except (NotFoundError, ValidationError) as e:
+    except (NotFoundError, ValidationError, ValueError) as e:
+        print(f"DEBUG: ValidationError/ValueError: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
@@ -219,6 +246,30 @@ async def get_bots(
             user_id=current_user.id,
             status=status_filter
         )
+        
+        # === SELF-HEALING: Recalculate stats for each bot ===
+        # This ensures consistency between Bot Management and Bot Details pages
+        from ...application.services.bot_stats_service import BotStatsService
+        from ...infrastructure.persistence.database import AsyncSessionLocal
+        import logging
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                stats_service = BotStatsService(session)
+                for bot in bots:
+                    try:
+                        await stats_service.update_stats_on_trade_close(str(bot.id), Decimal("0"))
+                    except Exception as e:
+                        logging.getLogger(__name__).warning(f"Stats recalc failed for bot {bot.id}: {e}")
+        except Exception as stats_err:
+            logging.getLogger(__name__).error(f"Stats recalculation session failed: {stats_err}")
+        
+        # Re-fetch bots to get updated stats
+        bots = await get_bots_use_case.execute(
+            user_id=current_user.id,
+            status=status_filter
+        )
+        
         return [bot_to_response(bot) for bot in bots]
     
     except Exception as e:
@@ -232,11 +283,38 @@ async def get_bot(
     get_bot_use_case: GetBotByIdUseCase = Depends(get_get_bot_by_id_use_case),
 ):
     """Get a specific bot."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from ...infrastructure.persistence.database import get_db
+    from ...application.services.bot_stats_service import BotStatsService
+    
     try:
         bot = await get_bot_use_case.execute(
             user_id=current_user.id,
             bot_id=bot_id
         )
+        
+        # === SELF-HEALING: Recalculate stats from Trade table ===
+        # This ensures that even if WebSocket updates failed, stats are always correct on page load.
+        try:
+            from ...interfaces.dependencies.providers import get_db as get_db_dep
+            # Create a fresh session for recalculation
+            from ...infrastructure.persistence.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                stats_service = BotStatsService(session)
+                # Call update_stats with a dummy PnL of 0 to trigger RECALCULATION
+                # (BotStatsService now uses self-healing aggregation instead of increments)
+                await stats_service.update_stats_on_trade_close(str(bot_id), Decimal("0"))
+        except Exception as stats_err:
+            # Don't fail the request if stats recalc fails, just log
+            import logging
+            logging.getLogger(__name__).error(f"Stats recalculation failed: {stats_err}")
+        
+        # Re-fetch bot to get updated stats
+        bot = await get_bot_use_case.execute(
+            user_id=current_user.id,
+            bot_id=bot_id
+        )
+        
         return bot_to_response(bot)
     
     except NotFoundError as e:
@@ -257,7 +335,11 @@ async def start_bot(
             user_id=current_user.id,
             bot_id=bot_id
         )
-        return bot_to_response(bot)
+        try:
+            return bot_to_response(bot)
+        except Exception as e:
+            print(f"DEBUG: Response Serialization Error: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Serialization Error: {e}")
     
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -388,73 +470,72 @@ async def get_bot_positions(
     limit: int = 50,
     offset: int = 0,
     current_user = Depends(get_current_user),
+    position_service: PositionService = Depends(get_position_service)
 ):
     """
     Get bot's open positions.
+    FETCHES LIVE FROM EXCHANGE and syncs to DB.
     
-    Returns paginated list of positions with:
-        - id: Position UUID
-        - symbol: Trading symbol
-        - side: LONG or SHORT
-        - quantity: Position size
-        - entry_price: Entry price
-        - current_price: Current price
-        - unrealized_pnl: Unrealized P&L
-        - unrealized_pnl_pct: Unrealized P&L percentage
-        - opened_at: Opening timestamp
+    Returns list of positions.
     """
-    from ...infrastructure.persistence.database import get_db_session
-    from sqlalchemy import select, and_, desc, func
-    from ...infrastructure.persistence.models.trading_models import PositionModel
-    
-    async with get_db_session() as session:
-        # Count total
-        count_stmt = select(func.count(PositionModel.id)).where(
-            and_(
-                PositionModel.bot_id == bot_id,
-                PositionModel.status == "OPEN",
-                PositionModel.deleted_at.is_(None)
-            )
-        )
-        count_result = await session.execute(count_stmt)
-        total = count_result.scalar() or 0
-        
-        # Get positions
-        stmt = select(PositionModel).where(
-            and_(
-                PositionModel.bot_id == bot_id,
-                PositionModel.status == "OPEN",
-                PositionModel.deleted_at.is_(None)
-            )
-        ).order_by(
-            desc(PositionModel.opened_at)
-        ).limit(limit).offset(offset)
-        
-        result = await session.execute(stmt)
-        positions = result.scalars().all()
-        
-        positions_data = []
-        for position in positions:
-            current_price = position.current_price or position.entry_price
-            
-            positions_data.append({
-                "id": str(position.id),
-                "symbol": position.symbol,
-                "side": position.side,
-                "quantity": float(position.quantity),
-                "entry_price": float(position.entry_price),
-                "current_price": float(current_price),
-                "unrealized_pnl": float(position.unrealized_pnl or 0),
-                "unrealized_pnl_pct": float(position.unrealized_pnl_pct or 0),
-                "opened_at": position.opened_at.isoformat()
-            })
-        
+    try:
+        result = await position_service.get_live_positions(bot_id)
+        # TODO: Implement in-memory pagination if result['positions'] is huge (unlikely for < 50)
         return {
-            "positions": positions_data,
-            "total": total,
+            "positions": result["positions"],
+            "total": result["total"],
             "limit": limit,
             "offset": offset
         }
+    except Exception as e:
+        # Log and raise
+        print(f"Error fetching positions: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+
+class ClosePositionRequest(BaseModel):
+    """Request model for closing a position."""
+    symbol: str
+    side: str = Field(..., description="LONG or SHORT")
+
+@router.post("/{bot_id}/positions/close")
+async def close_position(
+    bot_id: UUID,
+    request: ClosePositionRequest,
+    current_user = Depends(get_current_user),
+    position_service: PositionService = Depends(get_position_service)
+):
+    """
+    Close a specific position for the bot.
+    """
+    try:
+        return await position_service.close_position(
+            bot_id=bot_id,
+            symbol=request.symbol,
+            side=request.side
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        print(f"Error closing position: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post("/{bot_id}/positions/close-all")
+async def close_all_positions(
+    bot_id: UUID,
+    current_user = Depends(get_current_user),
+    position_service: PositionService = Depends(get_position_service)
+):
+    """
+    Close ALL open positions for the bot.
+    """
+    try:
+        return await position_service.close_all_positions(bot_id)
+    except Exception as e:
+        print(f"Error closing all positions: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/{bot_id}/orders")
@@ -485,11 +566,11 @@ async def get_bot_orders(
         - filled_avg_price: Average fill price
         - created_at: Creation timestamp
     """
-    from ...infrastructure.persistence.database import get_db_session
+    from ...infrastructure.persistence.database import get_db_context
     from sqlalchemy import select, and_, desc, func
     from ...infrastructure.persistence.models.trading_models import OrderModel
     
-    async with get_db_session() as session:
+    async with get_db_context() as session:
         # Build where clause
         where_clauses = [
             OrderModel.bot_id == bot_id,
@@ -565,23 +646,23 @@ async def get_bot_trades(
         - realized_pnl: Realized P&L
         - created_at: Execution timestamp
     """
-    from ...infrastructure.persistence.database import get_db_session
+    from ...infrastructure.persistence.database import get_db_context
     from sqlalchemy import select, and_, desc, func
     from ...infrastructure.persistence.models.trading_models import TradeModel
     from datetime import datetime
     
-    async with get_db_session() as session:
+    async with get_db_context() as session:
         # Build where clause
         where_clauses = [
-            TradeModel.bot_id == bot_id,
-            TradeModel.deleted_at.is_(None)
+            TradeModel.bot_id == bot_id
+            # TradeModel is immutable, no deleted_at
         ]
         
         if start_date:
-            where_clauses.append(TradeModel.created_at >= datetime.fromisoformat(start_date))
+            where_clauses.append(TradeModel.executed_at >= datetime.fromisoformat(start_date))
         
         if end_date:
-            where_clauses.append(TradeModel.created_at <= datetime.fromisoformat(end_date))
+            where_clauses.append(TradeModel.executed_at <= datetime.fromisoformat(end_date))
         
         # Count total
         count_stmt = select(func.count(TradeModel.id)).where(and_(*where_clauses))
@@ -592,7 +673,7 @@ async def get_bot_trades(
         stmt = select(TradeModel).where(
             and_(*where_clauses)
         ).order_by(
-            desc(TradeModel.created_at)
+            desc(TradeModel.executed_at)
         ).limit(limit).offset(offset)
         
         result = await session.execute(stmt)
@@ -607,8 +688,8 @@ async def get_bot_trades(
                 "quantity": float(trade.quantity),
                 "price": float(trade.price),
                 "fee": float(trade.fee or 0),
-                "realized_pnl": float(trade.realized_pnl or 0),
-                "created_at": trade.created_at.isoformat()
+                "realized_pnl": float(trade.pnl or 0),
+                "created_at": trade.executed_at.isoformat()
             })
         
         return {

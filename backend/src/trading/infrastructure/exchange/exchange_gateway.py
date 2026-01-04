@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
+from src.trading.shared.errors.infrastructure_errors import ExternalAPIError as ExchangeAPIError
 
 @dataclass
 class BalanceData:
@@ -23,6 +24,7 @@ class PositionData:
     mark_price: Decimal
     leverage: int
     unrealized_pnl: Decimal
+    margin_type: str = "cross"
 
 
 @dataclass
@@ -155,5 +157,43 @@ class ExchangeGateway(ABC):
             
         Returns:
             Current price as Decimal
+        """
+        pass
+
+    @abstractmethod
+    async def get_earliest_valid_timestamp(self, symbol: str, interval: str) -> int:
+        """
+        Get earliest valid timestamp for symbol.
+        
+        Args:
+            symbol: Trading symbol
+            interval: Candle interval
+            
+        Returns:
+            Timestamp in milliseconds
+        """
+        pass
+
+    @abstractmethod
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 500
+    ) -> List[List[Any]]:
+        """
+        Get kline/candlestick data.
+        
+        Args:
+            symbol: Trading symbol
+            interval: Kline interval
+            start_time: Start time in milliseconds
+            end_time: End time in milliseconds
+            limit: Result limit
+            
+        Returns:
+            List of kline data arrays
         """
         pass

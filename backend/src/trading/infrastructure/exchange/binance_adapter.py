@@ -41,6 +41,12 @@ class BinanceAdapter(ExchangeGateway):
             # Fallback to basic implementation
             import aiohttp
             self._session = None
+            
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Convert BTC/USDT to BTCUSDT"""
+        if not symbol:
+            return symbol
+        return symbol.replace("/", "").upper()
     
     async def get_account_info(self) -> AccountInfoData:
         """
@@ -50,12 +56,14 @@ class BinanceAdapter(ExchangeGateway):
             AccountInfoData with balances and positions
         """
         try:
-            # Call Binance API
-            response = await self._signed_request("GET", "/fapi/v2/account")
+            # Call Binance API - Account for Balances, PositionRisk for Positions (markPrice)
+            # Parallel execution could be better but sequential is safer for now
+            account_response = await self._signed_request("GET", "/fapi/v2/account")
+            positions_response = await self._signed_request("GET", "/fapi/v2/positionRisk")
             
             # Parse balances
             balances = []
-            for asset_data in response.get("assets", []):
+            for asset_data in account_response.get("assets", []):
                 balance = Decimal(asset_data["walletBalance"])
                 if balance > 0:  # Only include non-zero balances
                     balances.append(
@@ -66,9 +74,12 @@ class BinanceAdapter(ExchangeGateway):
                         )
                     )
             
-            # Parse positions
+            # Parse positions from positionRisk
             positions = []
-            for pos_data in response.get("positions", []):
+            # positions_response is a list for positionRisk, not a dict with "positions" key
+            raw_positions = positions_response if isinstance(positions_response, list) else []
+            
+            for pos_data in raw_positions:
                 quantity = Decimal(pos_data["positionAmt"])
                 if quantity != 0:  # Only include open positions
                     positions.append(
@@ -79,20 +90,40 @@ class BinanceAdapter(ExchangeGateway):
                             entry_price=Decimal(pos_data["entryPrice"]),
                             mark_price=Decimal(pos_data["markPrice"]),
                             leverage=int(pos_data["leverage"]),
-                            unrealized_pnl=Decimal(pos_data["unrealizedProfit"])
+                            # Note: positionRisk uses 'unRealizedProfit' (capital R), account used 'unrealizedProfit'
+                            # We check both just in case
+                            unrealized_pnl=Decimal(pos_data.get("unRealizedProfit") or pos_data.get("unrealizedProfit") or "0"),
+                            margin_type=pos_data.get("marginType", "cross")
                         )
                     )
             
             return AccountInfoData(
-                account_id=response.get("accountAlias", "main"),
+                account_id=account_response.get("accountAlias", "main"),
                 balances=balances,
                 positions=positions,
-                total_balance=Decimal(response.get("totalWalletBalance", "0")),
-                available_balance=Decimal(response.get("availableBalance", "0"))
+                total_balance=Decimal(account_response.get("totalWalletBalance", "0")),
+                available_balance=Decimal(account_response.get("availableBalance", "0"))
             )
             
         except Exception as e:
             raise ExchangeAPIError(f"Failed to get account info: {str(e)}") from e
+
+    async def get_position_risk(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get position risk (leverage, margin type) from Binance.
+        
+        Args:
+            symbol: Optional symbol to filter by
+            
+        Returns:
+            List of position risk data
+        """
+        params = {}
+        if symbol:
+            params["symbol"] = self._normalize_symbol(symbol)
+            
+        return await self._signed_request("GET", "/fapi/v2/positionRisk", params)
+
     
     async def get_balance(self, asset: str) -> BalanceData:
         """Get balance for specific asset"""
@@ -124,22 +155,33 @@ class BinanceAdapter(ExchangeGateway):
     ) -> Dict[str, Any]:
         """Create new order"""
         params = {
-            "symbol": symbol,
+            "symbol": self._normalize_symbol(symbol),
             "side": side,
             "type": type,
             "quantity": str(quantity),
-            **kwargs
         }
+        
+        # Add positionSide for Hedge Mode compatibility
+        # BUY -> LONG, SELL -> SHORT (for opening positions)
+        if "positionSide" not in kwargs:
+            params["positionSide"] = "LONG" if side == "BUY" else "SHORT"
+        
+        # Add any extra params
+        params.update(kwargs)
         
         if price:
             params["price"] = str(price)
+            # LIMIT orders require timeInForce
+            if type == "LIMIT" and "timeInForce" not in params:
+                params["timeInForce"] = "GTC"
             
+        print(f"DEBUG [BinanceAdapter]: Sending order params: {params}")
         return await self._signed_request("POST", "/fapi/v1/order", params)
 
     async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         """Cancel an order"""
         params = {
-            "symbol": symbol,
+            "symbol": self._normalize_symbol(symbol),
             "orderId": order_id
         }
         return await self._signed_request("DELETE", "/fapi/v1/order", params)
@@ -147,7 +189,7 @@ class BinanceAdapter(ExchangeGateway):
     async def get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         """Get order details"""
         params = {
-            "symbol": symbol,
+            "symbol": self._normalize_symbol(symbol),
             "orderId": order_id
         }
         return await self._signed_request("GET", "/fapi/v1/order", params)
@@ -156,7 +198,7 @@ class BinanceAdapter(ExchangeGateway):
         """Get open orders"""
         params = {}
         if symbol:
-            params["symbol"] = symbol
+            params["symbol"] = self._normalize_symbol(symbol)
         return await self._signed_request("GET", "/fapi/v1/openOrders", params)
 
     async def get_klines(
@@ -165,7 +207,9 @@ class BinanceAdapter(ExchangeGateway):
         interval: str,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-        limit: int = 500
+        limit: int = 500  # BINANCE API LIMIT: Max 500 per request
+        # TODO: Implement pagination loop for requests >500 to fetch complete datasets
+        # For now, callers must handle pagination themselves or accept truncated data
     ) -> List[List[Any]]:
         """
         Get kline/candlestick data from Binance Futures.
@@ -181,7 +225,7 @@ class BinanceAdapter(ExchangeGateway):
             List of kline data arrays
         """
         params = {
-            "symbol": symbol,
+            "symbol": self._normalize_symbol(symbol),
             "interval": interval,
             "limit": limit
         }
@@ -196,9 +240,25 @@ class BinanceAdapter(ExchangeGateway):
 
     async def get_ticker_price(self, symbol: str) -> Decimal:
         """Get current price"""
-        params = {"symbol": symbol}
+        params = {"symbol": self._normalize_symbol(symbol)}
         response = await self._request("GET", "/fapi/v1/ticker/price", params)
         return Decimal(response["price"])
+
+    async def get_earliest_valid_timestamp(self, symbol: str, interval: str) -> int:
+        """Get earliest valid timestamp for symbol"""
+        # Fetch first available candle by requesting from start_time=0
+        klines = await self.get_klines(
+            symbol=self._normalize_symbol(symbol),
+            interval=interval,
+            start_time=0,
+            limit=1
+        )
+        
+        if klines and len(klines) > 0:
+            # Return open time of first candle (index 0)
+            return int(klines[0][0])
+            
+        return 0
     
     # Private methods
     
@@ -222,14 +282,16 @@ class BinanceAdapter(ExchangeGateway):
     
     async def _signed_request(self, method: str, endpoint: str, params: Dict = None) -> Dict[str, Any]:
         """Make signed request (requires authentication)"""
+        from urllib.parse import urlencode
+        
         if params is None:
             params = {}
         
         # Add timestamp
         params["timestamp"] = int(time.time() * 1000)
         
-        # Create signature
-        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        # Create signature - Binance requires UNSORTED params with urlencode
+        query_string = urlencode(params)
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
@@ -243,6 +305,8 @@ class BinanceAdapter(ExchangeGateway):
         
         # Make request
         url = f"{self._base_url}{endpoint}"
+        print(f"DEBUG [BinanceAdapter]: {method} {url}")
+        print(f"DEBUG [BinanceAdapter]: Params (without signature): {list(params.keys())}")
         
         if hasattr(self, '_http'):
             response = await self._http.get(url, params=params, headers=headers)
@@ -262,6 +326,29 @@ class BinanceAdapter(ExchangeGateway):
                     )
                 return await response.json()
     
+    async def start_user_data_stream(self) -> str:
+        """
+        Start a new user data stream.
+        
+        Returns:
+            listenKey for the stream
+        """
+        response = await self._signed_request("POST", "/fapi/v1/listenKey")
+        return response["listenKey"]
+    
+    async def keep_alive_user_data_stream(self, listen_key: str):
+        """
+        Keep alive a user data stream to prevent timeout.
+        Stream expires after 60 minutes if not kept alive.
+        """
+        params = {"listenKey": listen_key}
+        await self._signed_request("PUT", "/fapi/v1/listenKey", params)
+        
+    async def close_user_data_stream(self, listen_key: str):
+        """Close a user data stream."""
+        params = {"listenKey": listen_key}
+        await self._signed_request("DELETE", "/fapi/v1/listenKey", params)
+
     async def close(self):
         """Close HTTP session"""
         if hasattr(self, '_session') and self._session:

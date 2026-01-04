@@ -20,7 +20,7 @@ export const botsApi = {
     if (filters?.is_paper_trading !== undefined) {
       params.append('is_paper_trading', String(filters.is_paper_trading));
     }
-    
+
     const response = await apiClient.get(`/api/v1/bots?${params.toString()}`);
     return response.data;
   },
@@ -61,7 +61,17 @@ export const botsApi = {
    */
   start: async (id: string): Promise<Bot> => {
     const response = await apiClient.post(`/api/v1/bots/${id}/start`);
-    return response.data;
+    // Handle both formats: {bot: {...}} or direct bot object
+    const data = response.data;
+    if (data.bot) {
+      return data.bot;
+    }
+    // Response might be the bot directly or have different structure
+    if (data.id) {
+      return data;
+    }
+    console.warn('start: Unexpected response format:', data);
+    return data;
   },
 
   /**
@@ -69,7 +79,16 @@ export const botsApi = {
    */
   stop: async (id: string): Promise<Bot> => {
     const response = await apiClient.post(`/api/v1/bots/${id}/stop`);
-    return response.data;
+    // Handle both formats: {bot: {...}} or direct bot object
+    const data = response.data;
+    if (data.bot) {
+      return data.bot;
+    }
+    if (data.id) {
+      return data;
+    }
+    console.warn('stop: Unexpected response format:', data);
+    return data;
   },
 
   /**
@@ -77,7 +96,16 @@ export const botsApi = {
    */
   pause: async (id: string): Promise<Bot> => {
     const response = await apiClient.post(`/api/v1/bots/${id}/pause`);
-    return response.data;
+    // Handle both formats: {bot: {...}} or direct bot object
+    const data = response.data;
+    if (data.bot) {
+      return data.bot;
+    }
+    if (data.id) {
+      return data;
+    }
+    console.warn('pause: Unexpected response format:', data);
+    return data;
   },
 
   /**

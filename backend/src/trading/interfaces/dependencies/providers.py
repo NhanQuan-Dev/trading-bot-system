@@ -12,12 +12,17 @@ from ...infrastructure.persistence.repositories.market_data_repository import (
     MarketDataSubscriptionRepository,
     CandleRepository,
     TickRepository,
-    TradeRepository,
     OrderBookRepository,
-    MarketStatsRepository
+    MarketStatsRepository,
+    MarketMetadataRepository
 )
+from ...infrastructure.persistence.repositories.trade_repository import TradeRepository
 from ...infrastructure.persistence.sqlalchemy.repositories.risk.risk_limit_repository import SqlAlchemyRiskLimitRepository
 from ...infrastructure.persistence.sqlalchemy.repositories.risk.risk_alert_repository import SqlAlchemyRiskAlertRepository
+from ...infrastructure.services.market_data_service import MarketDataService
+from ...infrastructure.exchange.binance_adapter import BinanceAdapter
+from ...infrastructure.repositories.exchange_repository import ExchangeRepository
+from ...domain.market_data.gap_detector import GapDetector
 
 # Use case imports
 from ...application.use_cases.bot_use_cases import (
@@ -54,6 +59,8 @@ from ...application.use_cases.market_data_use_cases import (
     GetMarketStatsUseCase,
     GetMarketOverviewUseCase
 )
+from src.application.services.connection_service import ConnectionService
+from ...application.services.position_service import PositionService
 from ...application.use_cases.risk import (
     CreateRiskLimitUseCase,
     GetRiskLimitsUseCase,
@@ -74,9 +81,17 @@ async def get_bot_repository(db: AsyncSession = Depends(get_db)) -> BotRepositor
     return BotRepository(db)
 
 
+
 async def get_strategy_repository(db: AsyncSession = Depends(get_db)) -> StrategyRepository:
     """Provide strategy repository instance."""
+    print("DEBUG: Instantiating StrategyRepository")
     return StrategyRepository(db)
+
+
+async def get_exchange_repository(db: AsyncSession = Depends(get_db)) -> ExchangeRepository:
+    """Provide exchange repository instance."""
+    return ExchangeRepository(db)
+
 
 
 async def get_market_data_subscription_repository(
@@ -118,7 +133,84 @@ async def get_risk_limit_repository(db: AsyncSession = Depends(get_db)) -> SqlAl
 
 async def get_risk_alert_repository(db: AsyncSession = Depends(get_db)) -> SqlAlchemyRiskAlertRepository:
     """Provide risk alert repository instance."""
+async def get_risk_alert_repository(db: AsyncSession = Depends(get_db)) -> SqlAlchemyRiskAlertRepository:
+    """Provide risk alert repository instance."""
     return SqlAlchemyRiskAlertRepository(db)
+
+
+async def get_market_metadata_repository(db: AsyncSession = Depends(get_db)) -> MarketMetadataRepository:
+    """Provide market metadata repository instance."""
+    return MarketMetadataRepository(db)
+
+
+# ============================================================================
+# Service Dependencies
+# ============================================================================
+
+def get_gap_detector() -> GapDetector:
+    """Provide gap detector instance."""
+    return GapDetector()
+
+
+async def get_connection_service(db: AsyncSession = Depends(get_db)) -> ConnectionService:
+    """Provide connection service instance."""
+    return ConnectionService(db)
+
+
+from ...infrastructure.persistence.repositories.order_repository import OrderRepository
+from ...application.services.bot_stats_service import BotStatsService
+from ...application.use_cases.order.update_order_status import UpdateOrderStatusUseCase
+
+# ... existing imports ...
+
+async def get_order_repository(db: AsyncSession = Depends(get_db)) -> OrderRepository:
+    """Provide order repository instance."""
+    return OrderRepository(db)
+
+
+async def get_bot_stats_service(db: AsyncSession = Depends(get_db)) -> BotStatsService:
+    """Provide bot stats service instance."""
+    return BotStatsService(db)
+
+
+async def get_update_order_status_use_case(
+    order_repo: OrderRepository = Depends(get_order_repository),
+    trade_repo: TradeRepository = Depends(get_trade_repository),
+    bot_stats_service: BotStatsService = Depends(get_bot_stats_service)
+) -> UpdateOrderStatusUseCase:
+    """Provide update order status use case instance."""
+    return UpdateOrderStatusUseCase(order_repo, trade_repo, bot_stats_service)
+
+
+async def get_position_service(
+    db: AsyncSession = Depends(get_db),
+    bot_repo: BotRepository = Depends(get_bot_repository),
+    connection_service: ConnectionService = Depends(get_connection_service),
+    order_repo: OrderRepository = Depends(get_order_repository),
+    update_order_status_use_case: UpdateOrderStatusUseCase = Depends(get_update_order_status_use_case)
+) -> PositionService:
+    """Provide position service instance."""
+    return PositionService(db, bot_repo, connection_service, order_repo, update_order_status_use_case)
+
+
+def get_public_binance_adapter() -> BinanceAdapter:
+    """Provide public Binance adapter (no credentials)."""
+    return BinanceAdapter(api_key=None, api_secret=None)
+
+
+def get_market_data_service(
+    adapter: BinanceAdapter = Depends(get_public_binance_adapter),
+    candle_repo: CandleRepository = Depends(get_candle_repository),
+    metadata_repo: MarketMetadataRepository = Depends(get_market_metadata_repository),
+    gap_detector: GapDetector = Depends(get_gap_detector)
+) -> MarketDataService:
+    """Provide market data service instance."""
+    return MarketDataService(
+        exchange_adapter=adapter,
+        candle_repository=candle_repo,
+        metadata_repository=metadata_repo,
+        gap_detector=gap_detector
+    )
 
 
 # ============================================================================
@@ -126,10 +218,12 @@ async def get_risk_alert_repository(db: AsyncSession = Depends(get_db)) -> SqlAl
 # ============================================================================
 
 async def get_create_bot_use_case(
-    bot_repo: BotRepository = Depends(get_bot_repository)
+    bot_repo: BotRepository = Depends(get_bot_repository),
+    strategy_repo: StrategyRepository = Depends(get_strategy_repository),
+    exchange_repo: ExchangeRepository = Depends(get_exchange_repository)
 ) -> CreateBotUseCase:
     """Provide create bot use case instance."""
-    return CreateBotUseCase(bot_repo)
+    return CreateBotUseCase(bot_repo, strategy_repo, exchange_repo)
 
 
 async def get_get_bot_by_id_use_case(
@@ -150,14 +244,25 @@ async def get_start_bot_use_case(
     bot_repo: BotRepository = Depends(get_bot_repository)
 ) -> StartBotUseCase:
     """Provide start bot use case instance."""
-    return StartBotUseCase(bot_repo)
+    from ...application.services.bot_manager import get_bot_manager
+    try:
+        bot_manager = get_bot_manager()
+    except RuntimeError:
+        # BotManager not initialized (shouldn't happen in production)
+        bot_manager = None
+    return StartBotUseCase(bot_repo, bot_manager=bot_manager)
 
 
 async def get_stop_bot_use_case(
     bot_repo: BotRepository = Depends(get_bot_repository)
 ) -> StopBotUseCase:
     """Provide stop bot use case instance."""
-    return StopBotUseCase(bot_repo)
+    from ...application.services.bot_manager import get_bot_manager
+    try:
+        bot_manager = get_bot_manager()
+    except RuntimeError:
+        bot_manager = None
+    return StopBotUseCase(bot_repo, bot_manager=bot_manager)
 
 
 async def get_pause_bot_use_case(
@@ -290,10 +395,10 @@ async def get_delete_market_data_subscription_use_case(
 
 
 async def get_get_candle_data_use_case(
-    candle_repo: CandleRepository = Depends(get_candle_repository)
+    market_data_service: MarketDataService = Depends(get_market_data_service)
 ) -> GetCandleDataUseCase:
     """Provide get candle data use case instance."""
-    return GetCandleDataUseCase(candle_repo)
+    return GetCandleDataUseCase(market_data_service)
 
 
 async def get_get_ohlc_data_use_case(

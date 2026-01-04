@@ -3,13 +3,13 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from datetime import datetime
 from datetime import timezone as dt_timezone
-from passlib.context import CryptContext
+import bcrypt
 import uuid
 import re
 
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Remove CryptContext
+# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 @dataclass(frozen=True)
@@ -43,12 +43,17 @@ class HashedPassword:
         if len(plain_password) > 100:
             raise ValueError("Password must be at most 100 characters")
         
-        hashed = pwd_context.hash(plain_password)
-        return cls(value=hashed)
+        # Use direct bcrypt
+        hashed = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
+        return cls(value=hashed.decode('utf-8'))
     
     def verify(self, plain_password: str) -> bool:
         """Verify plain password against hashed password."""
-        return pwd_context.verify(plain_password, self.value)
+        # Use direct bcrypt
+        try:
+            return bcrypt.checkpw(plain_password.encode('utf-8'), self.value.encode('utf-8'))
+        except Exception:
+            return False
 
 
 class User:

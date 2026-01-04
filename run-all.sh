@@ -61,9 +61,9 @@ echo ""
 
 # Check if Redis is running
 echo -e "${BLUE}[2/5] Checking Redis...${NC}"
-if ! sudo docker ps | grep -q redis; then
+if ! docker ps | grep -q redis; then
     echo -e "${YELLOW}Starting Redis container...${NC}"
-    sudo docker start redis 2>/dev/null || sudo docker run -d --name redis -p 6379:6379 redis:alpine
+    docker start redis 2>/dev/null || docker run -d --name redis -p 6379:6379 redis:alpine
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Redis started${NC}"
     else
@@ -79,16 +79,21 @@ echo ""
 echo -e "${BLUE}[3/5] Starting Backend API...${NC}"
 cd backend
 
+# Use root venv (consolidated)
+ROOT_VENV="../venv"
+
 # Check if venv exists
-if [ ! -d "venv" ]; then
+if [ ! -d "$ROOT_VENV" ]; then
     echo -e "${RED}✗ Virtual environment not found!${NC}"
     echo -e "${YELLOW}Creating virtual environment...${NC}"
+    cd ..
     python3 -m venv venv
     source venv/bin/activate
     echo -e "${YELLOW}Installing dependencies...${NC}"
-    pip install -q -r requirements.txt
+    pip install -q -r backend/requirements.txt
+    cd backend
 else
-    source venv/bin/activate
+    source $ROOT_VENV/bin/activate
 fi
 
 # Check if .env exists
@@ -105,7 +110,7 @@ if [ ! -f ".env" ]; then
 fi
 
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-nohup python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
+nohup python3 -m uvicorn src.main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 

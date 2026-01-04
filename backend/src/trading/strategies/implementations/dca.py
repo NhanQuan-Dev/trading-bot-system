@@ -19,17 +19,23 @@ class DCAStrategy(StrategyBase):
     async def on_tick(self, market_data: Any):
         """
         DCA Logic: Buy if enough time has passed.
+        
+        Args:
+            market_data: List of klines/candles from exchange (OHLCV)
         """
         current_time = int(time.time())
-        symbol = market_data.get("symbol")
+        # Symbol is in self.config, not market_data list
+        symbol = self.config.get("symbol")
         
         if current_time - self.last_buy_time >= self.interval_seconds:
             logger.info(f"[DCA] Triggering buy for {symbol}")
             
             # Execute Market Buy
-            await self.buy(
-                symbol=symbol,
-                quantity=self.amount
-            )
-            
-            self.last_buy_time = current_time
+            try:
+                await self.buy(
+                    symbol=symbol,
+                    quantity=self.amount
+                )
+                self.last_buy_time = current_time
+            except Exception as e:
+                logger.error(f"[DCA] Buy failed: {e}")

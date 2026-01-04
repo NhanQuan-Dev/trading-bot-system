@@ -41,11 +41,16 @@ export const connectionsApi = {
   },
 
   /**
-   * Test connection credentials
+   * Test connection credentials - uses refresh endpoint to test and update status
    */
   test: async (data: TestConnectionRequest): Promise<TestConnectionResponse> => {
-    const response = await apiClient.post('/api/v1/exchanges/connections/test', data);
-    return response.data;
+    const response = await apiClient.post(`/api/connections/${data.connection_id}/refresh`);
+    // Map refresh response to TestConnectionResponse format
+    const testResult = response.data.test_result || {};
+    return {
+      success: testResult.success ?? false,
+      message: testResult.message || testResult.error || 'Connection test completed',
+    };
   },
 
   /**

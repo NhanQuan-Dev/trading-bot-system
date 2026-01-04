@@ -80,18 +80,44 @@ class RunBacktestUseCase:
             await self.repository.save(backtest_run)
         
         try:
-            # Fetch historical data
+            # Fetch historical data - now with wait_for_data=True
+            # MarketDataService will queue repair job AND poll DB until data is available
             logger.info(f"Fetching historical data for {symbol} from {start_date} to {end_date}")
+            
+            # Start the backtest NOW to show RUNNING status in UI
+            backtest_run.start()
+            await self.repository.save(backtest_run)
+            
+            # Define progress callback to update backtest progress during data fetch
+            # Maps data fetch progress (0-100%) to first 80% of total backtest (User requested 80% for fetching)
+            async def data_fetch_progress_callback(percent: int, message: str):
+                """Update backtest progress during data fetching phase."""
+                overall_percent = int(percent * 0.8)
+                backtest_run.update_progress(overall_percent, message)  # Pass message to show on UI
+                logger.info(f"Data fetch progress: {percent}% (Overall: {overall_percent}%) - {message}")
+                await self.repository.save(backtest_run)
+            
             candles = await self.market_data_service.get_historical_candles(
                 symbol=symbol,
                 timeframe=timeframe,
                 start_date=start_date,
                 end_date=end_date,
+                limit=None,  # CRITICAL: No limit for backtests - fetch ALL candles in date range
+                repair=True,  # Auto-repair missing data
+                wait_for_data=True,  # NEW: Wait for data to be fetched before returning
+                max_wait_seconds=600,  # 10 minutes max wait
+                poll_interval_seconds=5,  # Check every 5 seconds
+                progress_callback=data_fetch_progress_callback,  # Pass progress callback
             )
-            logger.info(f"Fetched {len(candles) if candles else 0} candles")
             
-            if not candles:
-                raise ValueError("No historical data available for specified period")
+            if not candles or len(candles) == 0:
+                raise ValueError(
+                    f"No historical data available for {symbol} {timeframe} "
+                    f"from {start_date} to {end_date}. "
+                    "Please check if the requested time range has data available on the exchange."
+                )
+            
+            logger.info(f"Fetched {len(candles)} candles for backtest")
             
             # Create engine
             engine = BacktestEngine(
@@ -105,9 +131,13 @@ class RunBacktestUseCase:
                 ),
             )
             
-            # Progress callback
+            # Progress callback for backtest engine (scales 0-100% to 80-100% overall)
+            # Fetching is 80%, Simulation is 20% (per user request)
             async def progress_callback(percent: int):
-                backtest_run.update_progress(percent)
+                # Scale engine progress (0-100%) to overall progress (80-100%)
+                overall_percent = 80 + int(percent * 0.2)
+                message = f"Process {percent}% candles..."
+                backtest_run.update_progress(overall_percent, message)
                 await self.repository.save(backtest_run)
             
             # Run backtest
@@ -281,7 +311,7 @@ class DeleteBacktestUseCase:
     
     async def execute(self, backtest_id: UUID, user_id: UUID) -> bool:
         """
-        Delete backtest.
+        Delete backtest and cancel any related jobs.
         
         Args:
             backtest_id: Backtest to delete
@@ -290,6 +320,7 @@ class DeleteBacktestUseCase:
         Returns:
             True if deleted successfully
         """
+        from ...infrastructure.jobs.job_queue import job_queue
         
         backtest_run = await self.repository.get_by_id(backtest_id)
         
@@ -300,8 +331,15 @@ class DeleteBacktestUseCase:
         if backtest_run.user_id != user_id:
             raise PermissionError("Not authorized to delete this backtest")
         
-        # Don't delete running backtests
-        if backtest_run.status == BacktestStatus.RUNNING:
-            raise ValueError("Cannot delete running backtest, cancel it first")
+        # Cancel any pending jobs for this backtest BEFORE deleting
+        # This prevents orphaned jobs from continuing to run
+        try:
+            cancelled_count = await job_queue.cancel_jobs_by_backtest_id(str(backtest_id))
+            if cancelled_count > 0:
+                logger.info(f"Cancelled {cancelled_count} jobs before deleting backtest {backtest_id}")
+        except Exception as e:
+            logger.warning(f"Failed to cancel jobs for backtest {backtest_id}: {e}")
+            # Continue with delete even if job cancellation fails
         
         return await self.repository.delete(backtest_id)
+

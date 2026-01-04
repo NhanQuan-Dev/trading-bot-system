@@ -120,6 +120,11 @@ export default function Connections() {
         description: result.message,
         variant: result.success ? 'default' : 'destructive',
       });
+
+      // Refresh connections to update status after test
+      if (result.success) {
+        await fetchConnections();
+      }
     } catch (error) {
       toast({
         title: 'Test failed',
@@ -268,7 +273,9 @@ export default function Connections() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {connections.map((connection) => {
               // Use backend status field, fallback to is_active
-              const status = (connection as any).status || (connection.is_active ? 'CONNECTED' : 'DISCONNECTED');
+              let status = (connection as any).status || (connection.is_active ? 'CONNECTED' : 'DISCONNECTED');
+              if (status === 'active') status = 'CONNECTED';
+              if (status === 'error') status = 'ERROR';
               const config = statusConfig[status] || statusConfig.DISCONNECTED;
               const StatusIcon = config.icon;
               const statusColor = config.color;
@@ -294,38 +301,70 @@ export default function Connections() {
                       </Badge>
                     </div>
                   </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <StatusIcon className={cn("h-4 w-4", statusColor, status === 'CONNECTING' && 'animate-spin')} />
-                        <span className={cn("text-sm", statusColor)}>
-                          {config.label}
-                        </span>
+                  <CardContent className="space-y-3">
+                    {/* Endpoint URLs with connection status */}
+                    <div className="rounded-lg bg-muted/30 p-2 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground w-16">REST</span>
+                          <code className="text-xs">
+                            {connection.is_testnet
+                              ? 'demo-fapi.binance.com'
+                              : 'fapi.binance.com'}
+                          </code>
+                        </div>
+                        {status === 'CONNECTED' ? (
+                          <CheckCircle className="h-3.5 w-3.5 text-primary" />
+                        ) : status === 'ERROR' ? (
+                          <XCircle className="h-3.5 w-3.5 text-destructive" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                        )}
                       </div>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground w-16">WebSocket</span>
+                          <code className="text-xs">
+                            {connection.is_testnet
+                              ? 'fstream.binancefuture.com'
+                              : 'fstream.binance.com'}
+                          </code>
+                        </div>
+                        {status === 'CONNECTED' ? (
+                          <CheckCircle className="h-3.5 w-3.5 text-primary" />
+                        ) : status === 'ERROR' ? (
+                          <XCircle className="h-3.5 w-3.5 text-destructive" />
+                        ) : (
+                          <AlertCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* API Key */}
+                    <div className="flex items-center justify-between rounded-lg bg-muted/50 p-2">
+                      <span className="text-sm text-muted-foreground">API Key</span>
+                      <div className="flex items-center gap-2">
+                        <code className="text-xs">
+                          {showSecrets[connection.id] ? connection.api_key.substring(0, 8) + '...' : '••••••••'}
+                        </code>
+                        <button
+                          onClick={() => toggleSecret(connection.id)}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          {showSecrets[connection.id] ? (
+                            <EyeOff className="h-3 w-3" />
+                          ) : (
+                            <Eye className="h-3 w-3" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Created date */}
+                    <div className="text-right">
                       <span className="text-xs text-muted-foreground">
                         Created: {new Date(connection.created_at).toLocaleDateString()}
                       </span>
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between rounded-lg bg-muted/50 p-2">
-                        <span className="text-sm text-muted-foreground">API Key</span>
-                        <div className="flex items-center gap-2">
-                          <code className="text-xs">
-                            {showSecrets[connection.id] ? connection.api_key.substring(0, 8) + '...' : '••••••••'}
-                          </code>
-                          <button
-                            onClick={() => toggleSecret(connection.id)}
-                            className="text-muted-foreground hover:text-foreground"
-                          >
-                            {showSecrets[connection.id] ? (
-                              <EyeOff className="h-3 w-3" />
-                            ) : (
-                              <Eye className="h-3 w-3" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
                     </div>
 
                     <div className="flex gap-2 pt-2">

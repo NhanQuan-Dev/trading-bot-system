@@ -6,7 +6,7 @@ from ..base import StrategyBase
 logger = logging.getLogger(__name__)
 
 class ArbitrageStrategy(StrategyBase):
-    name = "Arbitrage"
+    name = "ARBITRAGE"
     description = "Exploits price differences of the same asset across different markets or pairs to generate risk-free profit."
 
     def __init__(self, exchange, config: Dict[str, Any]):

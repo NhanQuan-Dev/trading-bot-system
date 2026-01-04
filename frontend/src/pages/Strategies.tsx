@@ -146,6 +146,7 @@ function MetricCard({
 }
 
 import { useEffect } from 'react';
+import { apiClient } from '@/lib/api/client';
 
 // ... (other imports)
 
@@ -155,12 +156,9 @@ export default function Strategies() {
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
 
   useEffect(() => {
-    fetch('/api/v1/strategies')
+    apiClient.get('/api/v1/strategies')
       .then(res => {
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.json();
-      })
-      .then((data: BackendStrategy[]) => {
+        const data: BackendStrategy[] = res.data;
         const mappedStrategies: Strategy[] = data.map(s => ({
           id: s.id,
           name: s.name,

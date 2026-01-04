@@ -8,7 +8,7 @@ from ..base import StrategyBase
 logger = logging.getLogger(__name__)
 
 class MeanReversionStrategy(StrategyBase):
-    name = "Mean Reversion"
+    name = "MEAN_REVERSION"
     description = "Assumes high/low prices will return to the average. Buys when oversold (RSI < 30) and sells when overbought (RSI > 70)."
 
     def __init__(self, exchange, config: Dict[str, Any]):

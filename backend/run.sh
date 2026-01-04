@@ -10,15 +10,22 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}=== Trading Bot Platform API Server ===${NC}"
 echo ""
 
-# Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    echo -e "${YELLOW}Creating virtual environment...${NC}"
-    python3 -m venv venv
-fi
+# Use root venv (consolidated)
+ROOT_VENV="../venv"
 
-# Activate virtual environment
-echo -e "${GREEN}Activating virtual environment...${NC}"
-source venv/bin/activate
+# Check if virtual environment exists
+if [ ! -d "$ROOT_VENV" ]; then
+    echo -e "${YELLOW}Creating virtual environment...${NC}"
+    cd ..
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -q -r backend/requirements.txt
+    cd backend
+else
+    # Activate virtual environment
+    echo -e "${GREEN}Activating virtual environment...${NC}"
+    source $ROOT_VENV/bin/activate
+fi
 
 # Install dependencies if needed
 if ! python -c "import fastapi" 2>/dev/null; then

@@ -44,6 +44,13 @@ STRATEGIES = [
         "strategy_type": "CUSTOM",
         "description": "High frequency scalping strategy",
         "parameters": {"take_profit": 0.5, "stop_loss": 0.2}
+    },
+    {
+        "id": uuid.UUID("00000000-0000-0000-0000-000000000006"),
+        "name": "HighFrequencyTest",
+        "strategy_type": "CUSTOM",
+        "description": "Test strategy that alternates BUY/SELL every few ticks to generate maximum trades quickly. FOR TESTING ONLY!",
+        "parameters": {"tick_interval": 2, "quantity": "0.001", "use_market_orders": True, "max_position": "0.01"}
     }
 ]
 

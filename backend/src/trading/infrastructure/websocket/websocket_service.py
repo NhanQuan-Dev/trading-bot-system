@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import FastAPI
 
 from .binance_stream import binance_ws_client
+from .binance_user_stream import binance_user_stream
 from .websocket_manager import websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ class WebSocketService:
     
     def __init__(self):
         self.binance_client = binance_ws_client
+        self.user_stream = binance_user_stream
         self.websocket_manager = websocket_manager
         self.running = False
     
@@ -26,9 +28,13 @@ class WebSocketService:
         logger.info("Starting WebSocket services...")
         
         try:
-            # Start Binance WebSocket client
+            # Start Binance WebSocket client (Market Data)
             await self.binance_client.start()
-            logger.info("Binance WebSocket client started")
+            logger.info("Binance Market WebSocket client started")
+            
+            # Start User Data Stream Service
+            await self.user_stream.start()
+            logger.info("Binance User Data Stream service started")
             
             # Initialize WebSocket manager
             await self.websocket_manager.initialize()
@@ -51,7 +57,11 @@ class WebSocketService:
         try:
             # Stop Binance WebSocket client
             await self.binance_client.stop()
-            logger.info("Binance WebSocket client stopped")
+            logger.info("Binance Market WebSocket client stopped")
+            
+            # Stop User Data Stream
+            await self.user_stream.stop()
+            logger.info("Binance User Data Stream service stopped")
             
             # Cleanup WebSocket manager
             await self.websocket_manager.cleanup()

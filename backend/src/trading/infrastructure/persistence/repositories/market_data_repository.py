@@ -1,12 +1,12 @@
 """SQLAlchemy implementations of market data repositories."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_, desc
-from sqlalchemy.orm import selectinload
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ....domain.market_data import (
     MarketDataSubscription, Candle, Tick, Trade, OrderBook, MarketStats
@@ -19,16 +19,51 @@ from ....domain.market_data.repository import (
     IOrderBookRepository,
     IMarketStatsRepository
 )
+from ....domain.market_data import CandleInterval
 from ....domain.market_data import (
     DataType, CandleInterval
 )
 from ..models.market_data_models import (
     MarketDataSubscriptionModel,
     MarketPriceModel,
-    OrderBookSnapshotModel
+    OrderBookSnapshotModel,
+    MarketMetadataModel
 )
 from ..models.base import TimestampMixin
 from ..database import AsyncSession as DatabaseSession
+
+
+class MarketMetadataRepository:
+    """Repository for market data metadata."""
+    
+    def __init__(self, session: AsyncSession):
+        self._session = session
+        
+    async def get(
+        self,
+        exchange: str,
+        symbol: str,
+        timeframe: str
+    ) -> Optional[MarketMetadataModel]:
+        """Get metadata by unique constraint."""
+        stmt = select(MarketMetadataModel).where(
+            and_(
+                MarketMetadataModel.exchange == exchange,
+                MarketMetadataModel.symbol == symbol,
+                MarketMetadataModel.timeframe == timeframe
+            )
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+        
+    async def save(self, metadata: MarketMetadataModel) -> MarketMetadataModel:
+        """Save or update metadata."""
+        if not metadata.id:
+            self._session.add(metadata)
+        else:
+            await self._session.merge(metadata)
+        await self._session.flush()
+        return metadata
 
 
 class MarketDataSubscriptionRepository(IMarketDataSubscriptionRepository):
@@ -215,7 +250,7 @@ class CandleRepository(ICandleRepository):
         interval: CandleInterval,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
-        limit: int = 1000
+        limit: Optional[int] = None
     ) -> List[Candle]:
         """Find candles by symbol and interval within time range."""
         stmt = select(MarketPriceModel).where(
@@ -230,7 +265,11 @@ class CandleRepository(ICandleRepository):
         if end_time:
             stmt = stmt.where(MarketPriceModel.timestamp <= end_time)
             
-        stmt = stmt.order_by(MarketPriceModel.timestamp.desc()).limit(limit)
+        stmt = stmt.order_by(MarketPriceModel.timestamp.desc())
+        
+        # Only apply limit if specified (None = no limit, get all in range)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         
         result = await self._session.execute(stmt)
         models = result.scalars().all()
@@ -267,11 +306,56 @@ class CandleRepository(ICandleRepository):
         return count
 
     async def save_batch(self, candles: List[Candle]) -> None:
-        """Save multiple candles."""
+        """Save multiple candles using efficient bulk upsert."""
+        if not candles:
+            return
+
         try:
+            # Convert domains to dicts for bulk insert
+            values = []
             for candle in candles:
-                await self.save(candle)
+                values.append({
+                    "symbol": candle.symbol,
+                    "exchange_id": 1,
+                    "interval": candle.interval.value,
+                    "timestamp": candle.open_time,
+                    "open": candle.open_price,
+                    "high": candle.high_price,
+                    "low": candle.low_price,
+                    "close": candle.close_price,
+                    "volume": candle.volume,
+                    "quote_volume": candle.quote_volume if candle.quote_volume else None,
+                    "num_trades": candle.trade_count,
+                    "taker_buy_base_volume": candle.taker_buy_volume if candle.taker_buy_volume else None,
+                    "taker_buy_quote_volume": candle.taker_buy_quote_volume if candle.taker_buy_quote_volume else None
+                })
+            
+            # Prepare upsert statement
+            stmt = pg_insert(MarketPriceModel).values(values)
+            
+            # Define conflict update columns (all except PKs)
+            update_dict = {
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+                "quote_volume": stmt.excluded.quote_volume,
+                "num_trades": stmt.excluded.num_trades,
+                "taker_buy_base_volume": stmt.excluded.taker_buy_base_volume,
+                "taker_buy_quote_volume": stmt.excluded.taker_buy_base_volume
+            }
+            
+            # Upsert on conflict (symbol, exchange_id, interval, timestamp)
+            # Note: Ensure DB has unique constraint on these columns (it should)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['symbol', 'exchange_id', 'interval', 'timestamp'],
+                set_=update_dict
+            )
+            
+            await self._session.execute(stmt)
             await self._session.flush()
+            
         except Exception as e:
             await self._session.rollback()
             raise e
@@ -289,7 +373,7 @@ class CandleRepository(ICandleRepository):
             interval=interval,
             start_time=start_time,
             end_time=end_time,
-            limit=1000
+            limit=None  # CRITICAL: No limit, fetch all candles in range for backtest
         )
         
         return [
@@ -336,21 +420,41 @@ class CandleRepository(ICandleRepository):
 
     def _model_to_domain(self, model: MarketPriceModel) -> Candle:
         """Convert database model to domain entity."""
+        interval_delta = self._get_interval_delta(model.interval)
+        close_time = model.timestamp + interval_delta - timedelta(milliseconds=1)
+        
         return Candle(
             symbol=model.symbol,
             interval=CandleInterval(model.interval),
+            open_price=Decimal(str(model.open)),
+            high_price=Decimal(str(model.high)),
+            low_price=Decimal(str(model.low)),
+            close_price=Decimal(str(model.close)),
+            volume=Decimal(str(model.volume)),
+            quote_volume=Decimal(str(model.quote_volume)) if model.quote_volume else Decimal("0"),
             open_time=model.timestamp,
-            close_time=model.timestamp,  # Calculate based on interval
-            open_price=model.open,
-            high_price=model.high,
-            low_price=model.low,
-            close_price=model.close,
-            volume=model.volume,
-            quote_volume=model.quote_volume or Decimal("0"),
+            close_time=close_time,
             trade_count=model.num_trades or 0,
-            taker_buy_volume=model.taker_buy_base_volume,
-            taker_buy_quote_volume=model.taker_buy_quote_volume
+            taker_buy_volume=Decimal(str(model.taker_buy_base_volume)) if model.taker_buy_base_volume else None,
+            taker_buy_quote_volume=Decimal(str(model.taker_buy_quote_volume)) if model.taker_buy_quote_volume else None
         )
+
+    def _get_interval_delta(self, interval_str: str) -> timedelta:
+        """Calculate timedelta from interval string."""
+        unit = interval_str[-1]
+        value = int(interval_str[:-1])
+        if unit == 'm':
+            return timedelta(minutes=value)
+        elif unit == 'h':
+            return timedelta(hours=value)
+        elif unit == 'd':
+            return timedelta(days=value)
+        elif unit == 'w':
+            return timedelta(weeks=value)
+        elif unit == 'M':
+             # Approximation for Month
+            return timedelta(days=30 * value)
+        return timedelta(days=0)
 
 
 class OrderBookRepository(IOrderBookRepository):

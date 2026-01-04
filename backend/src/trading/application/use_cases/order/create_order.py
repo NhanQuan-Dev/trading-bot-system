@@ -94,6 +94,68 @@ class CreateOrderUseCase:
                 reduce_only=reduce_only,
                 leverage=leverage,
             )
+        elif order_type == OrderType.STOP:
+            if price is None or stop_price is None:
+                raise ValidationError("Price and stop price are required for stop limit orders")
+            order = Order.create_stop_limit_order(
+                user_id=user_id,
+                exchange_connection_id=exchange_connection_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                stop_price=stop_price,
+                position_side=position_side,
+                time_in_force=time_in_force,
+                reduce_only=reduce_only,
+                leverage=leverage,
+            )
+        elif order_type == OrderType.TAKE_PROFIT_MARKET:
+            if stop_price is None:
+                raise ValidationError("Stop price is required for take profit market orders")
+            order = Order.create_take_profit_market_order(
+                user_id=user_id,
+                exchange_connection_id=exchange_connection_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                stop_price=stop_price,
+                position_side=position_side,
+                reduce_only=reduce_only,
+                leverage=leverage,
+            )
+        elif order_type == OrderType.TAKE_PROFIT:
+            if price is None or stop_price is None:
+                raise ValidationError("Price and stop price are required for take profit limit orders")
+            order = Order.create_take_profit_limit_order(
+                user_id=user_id,
+                exchange_connection_id=exchange_connection_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                stop_price=stop_price,
+                position_side=position_side,
+                time_in_force=time_in_force,
+                reduce_only=reduce_only,
+                leverage=leverage,
+            )
+        elif order_type == OrderType.TRAILING_STOP_MARKET:
+            callback_rate = kwargs.get('callback_rate')
+            if callback_rate is None:
+                raise ValidationError("Callback rate is required for trailing stop market orders")
+            order = Order.create_trailing_stop_market_order(
+                user_id=user_id,
+                exchange_connection_id=exchange_connection_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                callback_rate=Decimal(str(callback_rate)),
+                activation_price=stop_price,  # stop_price used as activation price
+                position_side=position_side,
+                reduce_only=reduce_only,
+                leverage=leverage,
+            )
         else:
             raise ValidationError(f"Order type {order_type} not supported")
         

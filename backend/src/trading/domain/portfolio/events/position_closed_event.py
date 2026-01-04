@@ -1,6 +1,7 @@
 """Position closed domain event"""
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Optional
 from src.trading.shared.kernel.domain_event import DomainEvent
 
 
@@ -19,6 +20,7 @@ class PositionClosedEvent(DomainEvent):
         exit_price: Exit price
         realized_pnl: Realized profit/loss
         margin_released: Margin released back
+        bot_id: Bot that owns this position (if any)
     """
     
     account_id: str
@@ -30,7 +32,9 @@ class PositionClosedEvent(DomainEvent):
     exit_price: Decimal
     realized_pnl: Decimal
     margin_released: Decimal
+    bot_id: Optional[str] = None  # NEW: Link to bot for stats update
     
     def __post_init__(self):
         object.__setattr__(self, 'event_id', str(__import__('uuid').uuid4()))
         object.__setattr__(self, 'occurred_at', __import__('datetime').datetime.utcnow())
+
