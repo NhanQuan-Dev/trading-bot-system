@@ -582,6 +582,9 @@ export default function Backtest() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="1m">1m (Standard)</SelectItem>
+                        <SelectItem value="5m">5m (HTF)</SelectItem>
+                        <SelectItem value="15m">15m (HTF)</SelectItem>
+                        <SelectItem value="30m">30m (HTF)</SelectItem>
                         <SelectItem value="1h">1h (HTF)</SelectItem>
                         <SelectItem value="4h">4h (HTF)</SelectItem>
                         <SelectItem value="1d">1d (HTF)</SelectItem>
