@@ -19,10 +19,11 @@ from ...domain.backtesting import (
     PerformanceMetrics,
     BacktestEventType,
     BacktestEvent,
+    PositionSizing,
 )
 from .metrics_calculator import MetricsCalculator
 from .market_simulator import MarketSimulator
-from .timeframe_utils import resample_candles_to_htf, get_candles_in_htf_window
+from .timeframe_utils import resample_candles_to_htf, get_candles_in_htf_window, get_next_htf_window_candles
 
 logger = logging.getLogger(__name__)
 
@@ -158,17 +159,27 @@ class BacktestEngine:
                         self.signals_generated += 1
                         logger.debug(f"HTF Signal #{self.signals_generated} at HTF idx={htf_idx}: {htf_signal['type']}")
                     
-                    # Get 1m candles within this HTF window for execution
+                    # Spec3: Get 1m candles from NEXT HTF window for execution (prevent look-ahead)
+                    # Signal generated at HTF close (e.g., 10:00) → execute on 10:00-10:59 candles
                     htf_timestamp = datetime.fromisoformat(htf_candle["timestamp"]) if isinstance(htf_candle["timestamp"], str) else htf_candle["timestamp"]
-                    window_1m_candles = get_candles_in_htf_window(candles, htf_timestamp, self.config.signal_timeframe)
+                    execution_1m_candles = get_next_htf_window_candles(candles, htf_timestamp, self.config.signal_timeframe)
+                    
+                    # Edge case: No execution window for last HTF candle
+                    if htf_signal and not execution_1m_candles:
+                        logger.warning(f"No execution window available for HTF signal at {htf_timestamp}, skipping")
+                        continue
+                    
+                    # Process signal on first 1m candle of NEXT window (if we have a signal)
+                    signal_processed = False
                     
                     # Replay 1m candles for precision execution and TP/SL checks
-                    for m1_candle in window_1m_candles:
+                    for m1_candle in execution_1m_candles:
                         self.total_bars_processed += 1
                         
-                        # Process HTF signal on first 1m candle of window
-                        if htf_signal and m1_candle == window_1m_candles[0]:
+                        # Process HTF signal on first 1m candle of execution window
+                        if htf_signal and not signal_processed:
                             self._process_signal(htf_signal, m1_candle)
+                            signal_processed = True
                         
                         # Always check SL/TP and update metrics on every 1m candle
                         if self.current_position:
@@ -1101,7 +1112,7 @@ class BacktestEngine:
         
         Spec-required: Margin validation to prevent over-leveraging.
         """
-        if self.config.position_sizing == PositionSizing.FIXED_QUANTITY:
+        if self.config.position_sizing == PositionSizing.FIXED_SIZE:
             quantity = self.config.position_size_value
         elif self.config.position_sizing == PositionSizing.PERCENT_EQUITY:
             # Calculate max position value as % of equity

@@ -126,3 +126,45 @@ def get_candles_in_htf_window(
             matching_candles.append(candle)
     
     return matching_candles
+
+
+def get_next_htf_window_candles(
+    candles_1m: List[Dict],
+    htf_candle_timestamp: datetime,
+    htf_timeframe: str,
+) -> List[Dict]:
+    """
+    Get 1m candles from the NEXT HTF window (after signal is generated).
+    
+    Per backtestspec3.md:
+    - HTF 09:00 candle closes at 10:00
+    - Signal generated at 10:00
+    - Execution must use 1m candles from 10:00-10:59 (next window)
+    
+    This prevents look-ahead bias by ensuring we don't execute
+    within the same window used to generate the signal.
+    
+    Args:
+        candles_1m: Full list of 1m candles
+        htf_candle_timestamp: Start timestamp of HTF candle that closed
+        htf_timeframe: HTF timeframe string
+    
+    Returns:
+        List of 1m candles from the NEXT HTF window
+    """
+    interval_minutes = TIMEFRAME_MINUTES[htf_timeframe]
+    
+    # Next window starts when current HTF candle closes
+    next_window_start = htf_candle_timestamp + timedelta(minutes=interval_minutes)
+    next_window_end = next_window_start + timedelta(minutes=interval_minutes)
+    
+    matching_candles = []
+    for candle in candles_1m:
+        timestamp = candle["timestamp"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+        
+        if next_window_start <= timestamp < next_window_end:
+            matching_candles.append(candle)
+    
+    return matching_candles
