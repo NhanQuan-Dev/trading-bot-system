@@ -107,6 +107,30 @@ const mapped = data.backtests.map(...)
 2. Validate API response structure before processing
 3. Set empty array as fallback to prevent crashes
 
+#### API Request Timeouts
+
+**Symptom:**
+- Toast: "Error fetching backtests" or "Network Error"
+- Console: `AxiosError: timeout of 10000ms exceeded`
+- Error Code: `ECONNABORTED`
+
+**Common Causes:**
+1. **Backend Cold Start:** First request after restart is slow (Python imports, DB connection)
+2. **Heavy Query:** Fetching large datasets (e.g., all backtests with trades) without pagination
+3. **Short Timeout:** Default 10s timeout in `client.ts` is too strict for local dev
+
+**Fix Pattern:**
+1. **Increase Timeout:**
+   ```typescript
+   // frontend/src/lib/api/client.ts
+   export const apiClient = axios.create({
+     // ...
+     timeout: 30000, // Increase to 30s
+   });
+   ```
+2. **Optimize Backend:** Always use `limit` and `offset` for lists
+3. **Retry:** Refresh the page if it's a cold start issue
+
 ---
 
 ## 🟡 Backend Data Mapping Issues

@@ -7,7 +7,7 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 10000,
+  timeout: 30000,
 });
 
 // Request interceptor - Add auth token
@@ -44,7 +44,7 @@ apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
-    
+
     // If 401 and not already retried
     if (error.response?.status === 401 && !originalRequest._retry) {
       // Prevent refresh loop - if refresh endpoint itself fails, logout immediately
@@ -54,7 +54,7 @@ apiClient.interceptors.response.use(
         window.location.href = '/login';
         return Promise.reject(error);
       }
-      
+
       // Handle concurrent refresh requests with queue
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
@@ -64,10 +64,10 @@ apiClient.interceptors.response.use(
           return apiClient(originalRequest);
         }).catch(err => Promise.reject(err));
       }
-      
+
       originalRequest._retry = true;
       isRefreshing = true;
-      
+
       const refreshToken = localStorage.getItem('refresh_token');
       if (refreshToken) {
         try {
@@ -75,13 +75,13 @@ apiClient.interceptors.response.use(
           const { data } = await axios.post(`${API_BASE_URL}/api/v1/auth/refresh`, {
             refresh_token: refreshToken,
           });
-          
+
           // Save new access token
           localStorage.setItem('access_token', data.access_token);
-          
+
           // Process queued requests
           processQueue(null, data.access_token);
-          
+
           // Retry original request
           originalRequest.headers.Authorization = `Bearer ${data.access_token}`;
           return apiClient(originalRequest);
@@ -101,7 +101,7 @@ apiClient.interceptors.response.use(
         window.location.href = '/login';
       }
     }
-    
+
     return Promise.reject(error);
   }
 );
