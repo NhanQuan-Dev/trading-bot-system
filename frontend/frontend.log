@@ -3,7 +3,7 @@
 > vite
 
 
-  VITE v5.4.19  ready in 273 ms
+  VITE v5.4.19  ready in 271 ms
 
   ➜  Local:   http://localhost:8080/
   ➜  Network: http://192.168.1.11:8080/
@@ -11,4 +11,6 @@
 Browserslist: browsers data (caniuse-lite) is 7 months old. Please run:
   npx update-browserslist-db@latest
   Why you should do it regularly: https://github.com/browserslist/update-db#readme
-11:58:38 PM [vite] hmr update /src/pages/Backtest.tsx, /src/index.css
+12:01:45 AM [vite] hmr update /src/pages/Backtest.tsx, /src/index.css
+12:02:01 AM [vite] hmr update /src/pages/Backtest.tsx, /src/index.css
+12:02:25 AM [vite] hmr update /src/pages/Backtest.tsx, /src/index.css

@@ -108,6 +108,9 @@ export default function Backtest() {
   const [currentPage, setCurrentPage] = useState(1);
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  // Phase 2-3: Form state for Radix Select components (they don't sync with formData)
+  const [formSignalTimeframe, setFormSignalTimeframe] = useState('1m');
+  const [formFillPolicy, setFormFillPolicy] = useState('optimistic');
   const itemsPerPage = 10;
 
   // Strategy ID mapping - synced with backend seed_strategies.py
@@ -416,9 +419,9 @@ export default function Backtest() {
         position_sizing: 'percent_equity',
         position_size_percent: 100,
         mode: 'event_driven',
-        // Phase 2-3: New config fields
-        signal_timeframe: formData.get('signal_timeframe') || '1m',
-        fill_policy: formData.get('fill_policy') || 'optimistic',
+        // Phase 2-3: New config fields (use state, not formData for Radix Select)
+        signal_timeframe: formSignalTimeframe,
+        fill_policy: formFillPolicy,
       }
     };
 
@@ -576,7 +579,7 @@ export default function Backtest() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label>Signal Timeframe</Label>
-                    <Select name="signal_timeframe" defaultValue="1m">
+                    <Select value={formSignalTimeframe} onValueChange={setFormSignalTimeframe}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
@@ -593,7 +596,7 @@ export default function Backtest() {
                   </div>
                   <div className="space-y-2">
                     <Label>Fill Policy</Label>
-                    <Select name="fill_policy" defaultValue="optimistic">
+                    <Select value={formFillPolicy} onValueChange={setFormFillPolicy}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
