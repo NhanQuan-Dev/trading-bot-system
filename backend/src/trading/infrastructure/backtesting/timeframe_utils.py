@@ -1,7 +1,7 @@
 """Timeframe utilities for multi-timeframe backtesting."""
 
 from typing import List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 
@@ -52,7 +52,7 @@ def resample_candles_to_htf(
         # Floor to nearest interval boundary
         minutes_since_epoch = int(timestamp.timestamp() / 60)
         window_minutes = (minutes_since_epoch // interval_minutes) * interval_minutes
-        candle_window_start = datetime.fromtimestamp(window_minutes * 60)
+        candle_window_start = datetime.fromtimestamp(window_minutes * 60, tz=timezone.utc)
         
         # Start new window if needed
         if window_start_time is None:
