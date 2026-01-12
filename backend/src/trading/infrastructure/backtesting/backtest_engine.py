@@ -72,6 +72,25 @@ class BacktestEngine:
         self.total_bars_processed = 0
         self.signals_generated = 0
     
+    def _emit_event(
+        self,
+        event_type: BacktestEventType,
+        details: Dict[str, Any],
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Emit a backtest event for debugging and replay."""
+        if not self.backtest_run_id:
+            # Events only recorded when backtest run is active
+            return
+        
+        event = BacktestEvent(
+            backtest_id=self.backtest_run_id,
+            event_type=event_type,
+            timestamp=timestamp or datetime.utcnow(),
+            details=details,
+        )
+        self.events.append(event)
+    
     async def run_backtest(
         self,
         candles: List[Dict],
@@ -91,6 +110,9 @@ class BacktestEngine:
         Returns:
             BacktestResults with complete performance analysis
         """
+        
+        # Set backtest run ID for event tracking
+        self.backtest_run_id = backtest_run.id
         
         logger.info(f"Starting backtest with {len(candles)} candles")
         
@@ -359,6 +381,21 @@ class BacktestEngine:
         # Note: Don't modify equity when opening position
         # Equity will be updated when position is closed with realized PnL
         
+        # Emit event
+        self._emit_event(
+            BacktestEventType.TRADE_OPENED,
+            {
+                "direction": "LONG",
+                "price": float(fill.filled_price),
+                "quantity": float(fill.filled_quantity),
+                "stop_loss": float(signal.get("stop_loss")) if signal.get("stop_loss") else None,
+                "take_profit": float(signal.get("take_profit")) if signal.get("take_profit") else None,
+                "commission": float(fill.commission),
+                "fill_conditions": fill.fill_conditions_met,
+            },
+            timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+        )
+        
         logger.debug(f"Opened LONG: {fill.filled_quantity} @ {fill.filled_price}")
     
     def _open_short_position(
@@ -506,12 +543,37 @@ class BacktestEngine:
             max_runup=self.current_trade_max_runup,
             fill_policy_used=self.current_trade_fill_policy,
             fill_conditions_met=self.current_trade_fill_conditions,
-        )
         print(f"DEBUG: Created BacktestTrade with exit_reason: {trade.exit_reason}")
         # Trade is complete - no need to call close()
         
         self.trades.append(trade)
         self.current_position = None
+        
+        # Emit TRADE_CLOSED event
+        exit_event_type = BacktestEventType.TRADE_CLOSED
+        r_str_lower = r_str  # Already lowered above
+        if "stop loss" in r_str_lower or "sl" in r_str_lower:
+            exit_event_type = BacktestEventType.SL_HIT
+        elif "take profit" in r_str_lower or "tp" in r_str_lower:
+            exit_event_type = BacktestEventType.TP_HIT
+        elif "trailing" in r_str_lower:
+            exit_event_type = BacktestEventType.TRAILING_STOP_HIT
+        elif "liquidation" in r_str_lower:
+            exit_event_type = BacktestEventType.LIQUIDATION
+        
+        self._emit_event(
+            exit_event_type,
+            {
+                "direction": str(trade.direction),
+                "exit_price": float(fill.filled_price),
+                "pnl": float(net_pnl),
+                "pnl_percent": float(pnl_percent),
+                "exit_reason": exit_reason_dict,
+                "max_drawdown": float(self.current_trade_max_drawdown),
+                "max_runup": float(self.current_trade_max_runup),
+            },
+            timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+        )
         
         # Spec-required: Reset tracking variables
         self.current_trade_signal_time = None
