@@ -409,3 +409,13 @@ class BacktestRun:
         if self.started_at and self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
         return None
+
+    @property
+    def signal_timeframe(self) -> str:
+        """Get signal timeframe from config."""
+        return self.config.signal_timeframe or "1m"
+
+    @property
+    def fill_policy(self) -> str:
+        """Get fill policy from config."""
+        return self.config.fill_policy or "optimistic"
