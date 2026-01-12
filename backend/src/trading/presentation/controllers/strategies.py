@@ -44,8 +44,9 @@ class CreateStrategyRequest(BaseModel):
     
     name: str = Field(..., min_length=1, max_length=100)
     strategy_type: StrategyType
-    description: str = Field(..., min_length=1, max_length=1000)
-    parameters: Dict[str, Any] = Field(..., min_items=1)
+    description: str = Field(default="", min_length=0, max_length=1000)
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    code_content: Optional[str] = None
 
 
 class UpdateStrategyRequest(BaseModel):
@@ -55,6 +56,7 @@ class UpdateStrategyRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = Field(None, min_length=1, max_length=1000)
     parameters: Optional[Dict[str, Any]] = None
+    code_content: Optional[str] = None
 
 
 class StrategyResponse(BaseModel):
@@ -69,6 +71,7 @@ class StrategyResponse(BaseModel):
     is_active: bool
     created_at: str
     updated_at: str
+    code_content: Optional[str] = None
     
     # Parameters
     parameter_name: str
@@ -114,6 +117,7 @@ def strategy_to_response(strategy) -> StrategyResponse:
         total_fees=float(strategy.live_performance.total_fees),
         net_profit_loss=float(strategy.live_performance.net_profit_loss),
         max_drawdown=float(strategy.live_performance.max_drawdown),
+        code_content=strategy.code_content,
     )
 
 
@@ -131,6 +135,7 @@ async def create_strategy(
             strategy_type=request.strategy_type,
             description=request.description,
             parameters=request.parameters,
+            code_content=request.code_content,
         )
         return strategy_to_response(strategy)
     
@@ -193,6 +198,7 @@ async def update_strategy(
             name=request.name,
             description=request.description,
             parameters=request.parameters,
+            code_content=request.code_content,
         )
         return strategy_to_response(strategy)
     

@@ -84,5 +84,69 @@ class StrategyRegistry:
     def get_strategy_class(self, name: str) -> Type[StrategyBase]:
         return self.strategies.get(name)
 
+    def register_dynamic_strategy(self, code: str, strategy_name: str = None) -> bool:
+        """
+        Dynamically run the code and register the Strategy class found within.
+        
+        Args:
+            code: Python source code string
+            strategy_name: Optional expected name of the strategy
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # 1. Prepare Execution Environment
+            import pandas as pd
+            import numpy as np
+            from decimal import Decimal
+            from datetime import datetime
+            import math
+            
+            # Dependencies available to the strategy code
+            # Note: For security in production, this should be restricted.
+            exec_globals = {
+                "pd": pd,
+                "np": np,
+                "Decimal": Decimal,
+                "datetime": datetime,
+                "math": math,
+                "StrategyBase": StrategyBase,
+                "logger": logging.getLogger(f"strategy.{strategy_name or 'dynamic'}"),
+                # __builtins__ is included by default unless explicitly set
+            }
+            exec_locals = {}
+            
+            # 2. Execute Code
+            print(f"DEBUG: Compiling dynamic strategy code...")
+            exec(code, exec_globals, exec_locals)
+            
+            # 3. Find and Register Strategy Class
+            found = False
+            for name, obj in exec_locals.items():
+                if (inspect.isclass(obj) and 
+                    issubclass(obj, StrategyBase) and 
+                    obj is not StrategyBase):
+                    
+                    found_name = getattr(obj, 'name', name)
+                    
+                    # If we expect a specific name, ensure it matches or force it?
+                    # Ideally, strategy code defines correct name.
+                    print(f"DEBUG: Found dynamic strategy class: {name} (Name={found_name})")
+                    
+                    self.register(obj)
+                    found = True
+            
+            if not found:
+                logger.warning("No valid StrategyBase subclass found in dynamic code")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to register dynamic strategy: {e}", exc_info=True)
+            print(f"ERROR: Dynamic Strategy Compilation Failed: {e}")
+            return False
+
 # Global registry instance
 registry = StrategyRegistry()

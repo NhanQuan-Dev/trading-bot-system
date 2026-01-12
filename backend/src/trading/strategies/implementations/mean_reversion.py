@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import pandas_ta as ta
 import logging
@@ -8,7 +8,7 @@ from ..base import StrategyBase
 logger = logging.getLogger(__name__)
 
 class MeanReversionStrategy(StrategyBase):
-    name = "MEAN_REVERSION"
+    name = "Mean Reversion"
     description = "Assumes high/low prices will return to the average. Buys when oversold (RSI < 30) and sells when overbought (RSI > 70)."
 
     def __init__(self, exchange, config: Dict[str, Any]):
@@ -45,3 +45,47 @@ class MeanReversionStrategy(StrategyBase):
         elif current_rsi > self.rsi_upper:
             logger.info(f"[MeanRev] RSI Overbought ({current_rsi:.2f} > {self.rsi_upper}). SELL.")
             await self.sell(symbol, self.quantity)
+
+    def calculate_signal(self, candle: Dict, idx: int, position: Any) -> Optional[Dict]:
+        """Backtest signal calculation."""
+        close_price = float(candle['close'])
+        self.history.append({"close": close_price})
+        if len(self.history) > self.min_history * 2:
+            self.history.pop(0)
+
+        if len(self.history) < self.min_history:
+            return None
+
+        # RSI Calculation
+        df = pd.DataFrame(self.history)
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        
+        # Check if RSI was calculated (needs enough data)
+        if df["rsi"].iloc[-1] is None or pd.isna(df["rsi"].iloc[-1]):
+            return None
+
+        current_rsi = float(df["rsi"].iloc[-1])
+        
+        if current_rsi < self.rsi_lower and not position:
+            return {
+                "type": "open_long",
+                "quantity": float(self.quantity),
+                "metadata": {
+                    "strategy": "Mean Reversion (RSI)",
+                    "rsi": current_rsi,
+                    "threshold": self.rsi_lower,
+                    "signal": "Oversold (Buy)"
+                }
+            }
+        elif current_rsi > self.rsi_upper and position:
+            return {
+                "type": "close_position",
+                "metadata": {
+                    "strategy": "Mean Reversion (RSI)",
+                    "rsi": current_rsi,
+                    "threshold": self.rsi_upper,
+                    "signal": "Overbought (Sell)"
+                }
+            }
+            
+        return None

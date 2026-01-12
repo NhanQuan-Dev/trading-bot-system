@@ -95,6 +95,9 @@ class StrategyModel(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     strategy_type = Column(String(20), nullable=False, comment="Strategy type")
     description = Column(String(1000), nullable=False, comment="Strategy description")
     parameters = Column(JSONType, nullable=False, default={}, comment="Strategy parameters JSON")
+    # Dynamic Code Storage
+    code_content = Column(String, nullable=True, comment="Python source code for dynamic execution")
+    
     is_active = Column(Boolean, nullable=False, default=True, comment="Is strategy active")
     
     # Performance tracking

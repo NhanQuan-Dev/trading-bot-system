@@ -17,13 +17,16 @@ from ...domain.exchange.repository import IExchangeRepository
 from ..persistence.models.core_models import APIConnectionModel, ExchangeModel
 
 
+from ..config.settings import get_settings
+
 class ExchangeRepository(IExchangeRepository):
     """SQLAlchemy implementation of exchange repository."""
     
     def __init__(self, session: AsyncSession):
         self._session = session
         # Initialize Fernet for encryption/decryption
-        encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        settings = get_settings()
+        encryption_key = settings.ENCRYPTION_KEY
         if not encryption_key:
             raise ValueError("ENCRYPTION_KEY environment variable must be set")
         self._cipher = Fernet(encryption_key.encode())
@@ -138,6 +141,21 @@ class ExchangeRepository(IExchangeRepository):
             connections.append(self._to_domain(model, exchange.code))
         
         return connections
+
+    async def get_available_exchanges(self, user_id: uuid.UUID) -> List[str]:
+        """Get list of unique exchange codes available to user."""
+        stmt = (
+            select(ExchangeModel.code)
+            .join(APIConnectionModel, ExchangeModel.id == APIConnectionModel.exchange_id)
+            .where(
+                APIConnectionModel.user_id == user_id,
+                APIConnectionModel.deleted_at.is_(None)
+            )
+            .distinct()
+        )
+        result = await self._session.execute(stmt)
+        return [row[0] for row in result.fetchall()]
+
     
     async def find_by_user_and_exchange(
         self, 

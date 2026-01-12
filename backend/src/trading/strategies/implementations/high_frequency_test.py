@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import logging
 from ..base import StrategyBase
 
@@ -10,13 +10,13 @@ class HighFrequencyTestStrategy(StrategyBase):
     High-Frequency Test Strategy
     
     Purpose: Generate maximum number of trades in minimum time for system testing.
-    Logic: Alternate BUY/SELL every N ticks regardless of price movement.
+    Logic: Alternate LONG/SHORT every N ticks regardless of price movement.
     
     WARNING: This is NOT a profitable strategy. Only for testing infrastructure.
     """
     
     name = "HighFrequencyTest"
-    description = "Test strategy that alternates BUY/SELL every few ticks to generate maximum trades quickly. FOR TESTING ONLY!"
+    description = "Test strategy that alternates LONG/SHORT every few ticks to generate maximum trades quickly. FOR TESTING ONLY!"
 
     def __init__(self, exchange, config: Dict[str, Any], on_order=None):
         super().__init__(exchange, config, on_order)
@@ -32,7 +32,7 @@ class HighFrequencyTestStrategy(StrategyBase):
         # State tracking
         self.tick_count = 0
         self.trade_count = 0
-        self.last_side = None  # Track last trade to alternate
+        self.last_side = None  # Track last direction (LONG/SHORT) to alternate
         
         # Position tracking (simplified)
         self.position_qty = Decimal("0")  # Positive = LONG, Negative = SHORT
@@ -42,7 +42,7 @@ class HighFrequencyTestStrategy(StrategyBase):
 
     async def on_tick(self, market_data: Any):
         """
-        Execute trades at fixed intervals alternating BUY/SELL.
+        Execute trades at fixed intervals alternating LONG/SHORT.
         
         Market Data Formats:
         - Dict: {"symbol": "BTCUSDT", "price": 43000.0, ...}
@@ -88,24 +88,23 @@ class HighFrequencyTestStrategy(StrategyBase):
             logger.error(f"[{self.name}] Error parsing market data: {e}")
             return
         
-        # Determine trade side using alternating logic
-        side = self._determine_side()
-        print(f"[{self.name}] Determined side: {side}, position_qty={self.position_qty}")
+        # Determine trade direction (LONG/SHORT)
+        direction = self._determine_direction()
+        print(f"[{self.name}] Determined direction: {direction}, position_qty={self.position_qty}")
         
-        if not side:
-            print(f"[{self.name}] No side (position limit reached), waiting...")
+        if not direction:
+            print(f"[{self.name}] No direction (position limit reached), waiting...")
             logger.info(f"[{self.name}] Position limit reached [{self.position_qty}], waiting...")
             return
         
         # Execute trade
         try:
             # Calculate price
-            if self.use_market_orders:
-                price = None
-            else:
+            price = None
+            if not self.use_market_orders:
                 # Grid/Maker Mode: Place order at spread
                 spread = Decimal("0.0005") # 0.05% spread
-                if side == "BUY":
+                if direction == "LONG":
                     price = current_price * (Decimal("1") - spread)
                 else:
                     price = current_price * (Decimal("1") + spread)
@@ -113,25 +112,15 @@ class HighFrequencyTestStrategy(StrategyBase):
                 # Round to 1 decimal for BTC/USDT (Tick Size = 0.1)
                 price = price.quantize(Decimal("0.1"))
 
-            print(f"[{self.name}] Executing {side} order: qty={self.quantity}, price={price or 'MARKET'}")
+            print(f"[{self.name}] Executing {direction} action: qty={self.quantity}, price={price or 'MARKET'}")
             
-            if side == "BUY":
-                logger.info(f"[{self.name}] Trade #{self.trade_count + 1} - BUY {self.quantity} @ {price or 'MARKET'}")
-                print(f"[{self.name}] Calling self.buy({symbol}, {self.quantity}, price={price})...")
-                await self.buy(symbol, self.quantity, price=price)
-                if self.use_market_orders:
-                    self.position_qty += self.quantity # Only update position immediately if market order
-                self.last_side = "BUY"
-                print(f"[{self.name}] BUY order placed successfully!")
+            if direction == "LONG":
+                self.last_side = "LONG"
+                await self._open_long(symbol, self.quantity, price=price)
                 
-            else:  # SELL
-                logger.info(f"[{self.name}] Trade #{self.trade_count + 1} - SELL {self.quantity} @ {price or 'MARKET'}")
-                print(f"[{self.name}] Calling self.sell({symbol}, {self.quantity}, price={price})...")
-                await self.sell(symbol, self.quantity, price=price)
-                if self.use_market_orders:
-                    self.position_qty -= self.quantity # Only update position immediately if market order
-                self.last_side = "SELL"
-                print(f"[{self.name}] SELL order placed successfully!")
+            else:  # SHORT
+                self.last_side = "SHORT"
+                await self._open_short(symbol, self.quantity, price=price)
             
             self.trade_count += 1
             
@@ -141,31 +130,48 @@ class HighFrequencyTestStrategy(StrategyBase):
         except Exception as e:
             print(f"[{self.name}] EXCEPTION during trade execution: {e}")
             logger.error(f"[{self.name}] Trade execution failed: {e}")
+            
+    async def _open_long(self, symbol, quantity, price=None):
+        """Execute Open LONG action."""
+        logger.info(f"[{self.name}] Action: OPEN LONG {quantity} @ {price or 'MARKET'}")
+        await self.buy(symbol, quantity, price=price)
+        if self.use_market_orders:
+            self.position_qty += quantity
+            print(f"[{self.name}] OPEN LONG executed successfully!")
+
+    async def _open_short(self, symbol, quantity, price=None):
+        """Execute Open SHORT action."""
+        logger.info(f"[{self.name}] Action: OPEN SHORT {quantity} @ {price or 'MARKET'}")
+        await self.sell(symbol, quantity, price=price)
+        if self.use_market_orders:
+            self.position_qty -= quantity
+            print(f"[{self.name}] OPEN SHORT executed successfully!")
     
-    def _determine_side(self) -> str:
+    def _determine_direction(self) -> str:
         """
-        Determine next trade side based on current position and alternating logic.
+        Determine next trade direction based on current position and alternating logic.
         
         Logic:
-        1. If no position, start with BUY
-        2. If position too long, force SELL
-        3. If position too short, force BUY
-        4. Otherwise, alternate from last trade
+        1. If no position, start with LONG
+        2. If position too LONG, force SHORT
+        3. If position too SHORT, force LONG
+        4. Otherwise, alternate from last direction
         
         Returns:
-            "BUY", "SELL", or None if position limit reached
+            "LONG", "SHORT", or None if position limit reached
         """
         # Safety: Check position limits
         if self.position_qty >= self.max_position:
-            # Too much LONG position, must SELL
-            return "SELL"
+            # Too much LONG position, must go SHORT
+            return "SHORT"
         
         if self.position_qty <= -self.max_position:
-            # Too much SHORT position, must BUY
-            return "BUY"
+            # Too much SHORT position, must go LONG
+            return "LONG"
         
         # Alternating logic
-        if self.last_side is None or self.last_side == "SELL":
-            return "BUY"
+        if self.last_side is None or self.last_side == "SHORT":
+            return "LONG"
         else:
-            return "SELL"
+            return "SHORT"
+

@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         async with get_db_context() as session:
             await seed_users(session)
-            await seed_strategies(session)
+            # await seed_strategies(session) # User requested to disable auto-seeding
             await seed_exchanges(session)
             logger.info("Database seeded successfully")
     except Exception as e:

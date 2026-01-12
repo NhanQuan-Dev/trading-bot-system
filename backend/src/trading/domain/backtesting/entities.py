@@ -45,6 +45,8 @@ class BacktestTrade:
     strategy_signal: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     notes: Optional[str] = None
+    entry_reason: Optional[Dict[str, Any]] = None
+    exit_reason: Optional[Dict[str, Any]] = None
     
     def close_trade(
         self,
@@ -108,6 +110,21 @@ class BacktestPosition:
     unrealized_pnl: Decimal = Decimal("0")
     current_price: Decimal = Decimal("0")
     
+    # Stop Loss / Take Profit
+    stop_loss: Optional[Decimal] = None
+    take_profit: Optional[Decimal] = None
+    
+    # Trailing Stop
+    trailing_stop_percent: Optional[Decimal] = None  # e.g., Decimal("2.0") for 2%
+    trailing_stop_price: Optional[Decimal] = None    # Current trailing stop price
+    highest_price_since_entry: Optional[Decimal] = None  # For LONG: track highest
+    lowest_price_since_entry: Optional[Decimal] = None   # For SHORT: track lowest
+    
+    # Metadata
+    entry_time: Optional[str] = None
+    entry_commission: Decimal = Decimal("0")
+    metadata: Optional[Dict[str, Any]] = None
+    
     def is_flat(self) -> bool:
         """Check if position is flat (no position)."""
         return self.quantity == 0
@@ -134,6 +151,45 @@ class BacktestPosition:
             price_diff = self.avg_entry_price - current_price
         
         self.unrealized_pnl = price_diff * self.quantity
+    
+    def update_trailing_stop(self, candle_high: Decimal, candle_low: Decimal):
+        """Update trailing stop based on new high/low prices.
+        
+        For LONG: Trail based on highest price, stop below
+        For SHORT: Trail based on lowest price, stop above
+        """
+        if not self.trailing_stop_percent:
+            return
+        
+        if self.direction == TradeDirection.LONG:
+            # Track highest price
+            if self.highest_price_since_entry is None:
+                self.highest_price_since_entry = candle_high
+            elif candle_high > self.highest_price_since_entry:
+                self.highest_price_since_entry = candle_high
+            
+            # Update trailing stop price
+            trail_distance = self.highest_price_since_entry * (self.trailing_stop_percent / Decimal("100"))
+            new_trailing_stop = self.highest_price_since_entry - trail_distance
+            
+            # Trailing stop only moves UP (never down)
+            if self.trailing_stop_price is None or new_trailing_stop > self.trailing_stop_price:
+                self.trailing_stop_price = new_trailing_stop
+        
+        else:  # SHORT
+            # Track lowest price
+            if self.lowest_price_since_entry is None:
+                self.lowest_price_since_entry = candle_low
+            elif candle_low < self.lowest_price_since_entry:
+                self.lowest_price_since_entry = candle_low
+            
+            # Update trailing stop price
+            trail_distance = self.lowest_price_since_entry * (self.trailing_stop_percent / Decimal("100"))
+            new_trailing_stop = self.lowest_price_since_entry + trail_distance
+            
+            # Trailing stop only moves DOWN (never up)
+            if self.trailing_stop_price is None or new_trailing_stop < self.trailing_stop_price:
+                self.trailing_stop_price = new_trailing_stop
 
 
 @dataclass

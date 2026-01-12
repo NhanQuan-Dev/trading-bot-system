@@ -17,8 +17,21 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { useState } from 'react';
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useToast } from "@/components/ui/use-toast";
+import { Plus } from "lucide-react";
+import { useState, useEffect } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -26,9 +39,11 @@ import {
   Target,
   BarChart3,
   Zap,
-  Eye
+  Eye,
+  Copy
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { apiClient } from '@/lib/api/client';
 
 // Strategy interface
 interface Strategy {
@@ -59,7 +74,8 @@ interface BackendStrategy {
   win_rate: number;
   total_profit_loss: number;
   max_drawdown: number;
-  // Add other fields if needed, but these are the ones used in the UI mostly
+  code_content?: string;
+  parameter_values?: Record<string, any>;
 }
 
 const mapStrategyType = (type: string): Strategy['type'] => {
@@ -74,10 +90,6 @@ const mapStrategyType = (type: string): Strategy['type'] => {
     default: return 'Custom Strategy';
   }
 };
-
-
-// Mock strategies data removed
-const mockStrategies: Strategy[] = []; // Initial empty state
 
 function getStatusColor(status: Strategy['status']) {
   switch (status) {
@@ -145,15 +157,88 @@ function MetricCard({
   );
 }
 
-import { useEffect } from 'react';
-import { apiClient } from '@/lib/api/client';
-
-// ... (other imports)
-
 export default function Strategies() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
+  const [strategyDetails, setStrategyDetails] = useState<BackendStrategy | null>(null);
+
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const { toast } = useToast();
+
+  const handleViewDetails = async (strategy: Strategy) => {
+    setSelectedStrategy(strategy);
+    setStrategyDetails(null);
+
+    try {
+      const res = await apiClient.get<BackendStrategy>(`/api/v1/strategies/${strategy.id}`);
+      setStrategyDetails(res.data);
+    } catch (error) {
+      console.error("Failed to fetch strategy details", error);
+      toast({
+        title: "Error",
+        description: "Failed to load strategy details",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const [newStrategy, setNewStrategy] = useState({
+    name: '',
+    type: 'CUSTOM',
+    description: '',
+    code_content: `from src.trading.strategies.base import StrategyBase
+import pandas as pd
+
+class CustomStrategy(StrategyBase):
+    name = "MyCustomStrategy"
+    
+    def __init__(self, exchange, config):
+        super().__init__(exchange, config)
+        
+    async def on_tick(self, market_data):
+        # Your trading logic here
+        pass`,
+    parameters: '{}'
+  });
+
+  const handleCreate = async () => {
+    try {
+      let parsedParams = {};
+      try {
+        parsedParams = JSON.parse(newStrategy.parameters);
+      } catch (e) {
+        toast({
+          title: "Invalid Parameters",
+          description: "Parameters must be valid JSON",
+          variant: "destructive"
+        });
+        return;
+      }
+
+      await apiClient.post('/api/v1/strategies/', {
+        name: newStrategy.name,
+        strategy_type: newStrategy.type,
+        description: newStrategy.description,
+        parameters: parsedParams,
+        code_content: newStrategy.code_content
+      });
+
+      toast({
+        title: "Success",
+        description: "Strategy created successfully",
+      });
+      setIsCreateOpen(false);
+      window.location.reload();
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.response?.data?.detail || "Failed to create strategy",
+        variant: "destructive"
+      });
+    }
+  };
 
   useEffect(() => {
     apiClient.get('/api/v1/strategies')
@@ -164,16 +249,15 @@ export default function Strategies() {
           name: s.name,
           type: mapStrategyType(s.strategy_type),
           description: s.description,
-          activeBots: s.is_active ? 1 : 0, // Simplified mapping as backend doesn't give active bot count directly in list yet? Or it does? 
-          // Wait, backend response `StrategyResponse` has `total_trades`, `win_rate`, `total_profit_loss`, `max_drawdown`
+          activeBots: s.is_active ? 1 : 0,
           totalTrades: s.total_trades || 0,
           winRate: s.win_rate || 0,
-          avgPnl: 0, // Not in list response
+          avgPnl: 0,
           totalPnl: s.total_profit_loss || 0,
-          sharpeRatio: 0, // Not in list response
+          sharpeRatio: 0,
           maxDrawdown: s.max_drawdown || 0,
-          profitFactor: 0, // Not in list response
-          avgHoldTime: '0h', // Not in list response
+          profitFactor: 0,
+          avgHoldTime: '0h',
           status: s.is_active ? 'active' : 'inactive',
         }));
         setStrategies(mappedStrategies);
@@ -181,12 +265,11 @@ export default function Strategies() {
       })
       .catch(err => {
         console.error("Failed to fetch strategies", err);
-        setStrategies([]); // Ensure it's empty array on error
+        setStrategies([]);
         setLoading(false);
       });
   }, []);
 
-  // Calculate aggregate metrics
   const totalStrategies = strategies.length;
   const activeStrategies = strategies.filter(s => s.status === 'active').length;
   const totalPnl = strategies.reduce((acc, s) => acc + s.totalPnl, 0);
@@ -210,8 +293,13 @@ export default function Strategies() {
 
   return (
     <DashboardLayout>
-      <Dialog open={!!selectedStrategy} onOpenChange={(open) => !open && setSelectedStrategy(null)}>
-        <DialogContent>
+      <Dialog open={!!selectedStrategy} onOpenChange={(open) => {
+        if (!open) {
+          setSelectedStrategy(null);
+          setStrategyDetails(null);
+        }
+      }}>
+        <DialogContent className="max-w-[800px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {selectedStrategy && getTypeIcon(selectedStrategy.type)}
@@ -221,42 +309,145 @@ export default function Strategies() {
               {selectedStrategy?.description}
             </DialogDescription>
           </DialogHeader>
+
           {selectedStrategy && (
-            <div className="grid grid-cols-2 gap-4 mt-4">
-              <div className="p-3 rounded-lg bg-muted/50">
-                <p className="text-xs text-muted-foreground">Total P&L</p>
-                <p className={cn("text-lg font-bold", selectedStrategy.totalPnl >= 0 ? "text-primary" : "text-destructive")}>
-                  {selectedStrategy.totalPnl >= 0 ? '+' : ''}${selectedStrategy.totalPnl.toLocaleString()}
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-muted/50">
-                <p className="text-xs text-muted-foreground">Win Rate</p>
-                <p className={cn("text-lg font-bold", selectedStrategy.winRate >= 50 ? "text-primary" : "text-destructive")}>
-                  {selectedStrategy.winRate}%
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-muted/50">
-                <p className="text-xs text-muted-foreground">Sharpe Ratio</p>
-                <p className="text-lg font-bold">{selectedStrategy.sharpeRatio}</p>
-              </div>
-              <div className="p-3 rounded-lg bg-muted/50">
-                <p className="text-xs text-muted-foreground">Active Bots</p>
-                <p className="text-lg font-bold">{selectedStrategy.activeBots}</p>
-              </div>
+            <div className="space-y-6 mt-4">
+              {strategyDetails ? (
+                <>
+                  <div className="space-y-2">
+                    <Label>Default Parameters (JSON)</Label>
+                    <div className="bg-muted p-4 rounded-md overflow-x-auto">
+                      <pre className="text-xs font-mono">
+                        {JSON.stringify(strategyDetails.parameter_values || {}, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>Strategy Code</Label>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 gap-1"
+                        onClick={() => {
+                          navigator.clipboard.writeText(strategyDetails.code_content || '');
+                          toast({ description: "Code copied to clipboard" });
+                        }}
+                      >
+                        <Copy className="h-3 w-3" />
+                        <span className="text-xs">Copy</span>
+                      </Button>
+                    </div>
+                    <div className="bg-muted p-4 rounded-md overflow-x-auto">
+                      <pre className="text-xs font-mono min-h-[300px]">
+                        {strategyDetails.code_content || '# No code content available'}
+                      </pre>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex justify-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                </div>
+              )}
             </div>
           )}
+          <DialogFooter>
+            <Button onClick={() => setSelectedStrategy(null)}>Close</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+        <DialogContent className="max-w-[800px] max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Create New Strategy</DialogTitle>
+            <DialogDescription>
+              Define a new trading strategy using Python code.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="name">Name</Label>
+                <Input
+                  id="name"
+                  value={newStrategy.name}
+                  onChange={(e) => setNewStrategy({ ...newStrategy, name: e.target.value })}
+                  placeholder="My Strategy"
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="type">Type</Label>
+                <Select
+                  value={newStrategy.type}
+                  onValueChange={(val) => setNewStrategy({ ...newStrategy, type: val })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="GRID">Grid Trading</SelectItem>
+                    <SelectItem value="DCA">DCA</SelectItem>
+                    <SelectItem value="TREND_FOLLOWING">Trend Following</SelectItem>
+                    <SelectItem value="MEAN_REVERSION">Mean Reversion</SelectItem>
+                    <SelectItem value="SCALPING">Scalping</SelectItem>
+                    <SelectItem value="ARBITRAGE">Arbitrage</SelectItem>
+                    <SelectItem value="CUSTOM">Custom Strategy</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="description">Description</Label>
+              <Textarea
+                id="description"
+                value={newStrategy.description}
+                onChange={(e) => setNewStrategy({ ...newStrategy, description: e.target.value })}
+                placeholder="Describe your strategy logic..."
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="code">Python Code (Hot Reload Supported)</Label>
+              <Textarea
+                id="code"
+                value={newStrategy.code_content}
+                onChange={(e) => setNewStrategy({ ...newStrategy, code_content: e.target.value })}
+                className="font-mono min-h-[300px] text-xs"
+                spellCheck={false}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="parameters">Default Parameters (JSON)</Label>
+              <Textarea
+                id="parameters"
+                value={newStrategy.parameters}
+                onChange={(e) => setNewStrategy({ ...newStrategy, parameters: e.target.value })}
+                className="font-mono h-[100px]"
+                placeholder="{}"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsCreateOpen(false)}>Cancel</Button>
+            <Button onClick={handleCreate}>Create Strategy</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <div className="space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Strategy Management</h1>
             <p className="text-muted-foreground">Monitor and manage all trading strategies</p>
           </div>
+          <Button onClick={() => setIsCreateOpen(true)} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Create Strategy
+          </Button>
         </div>
 
-        {/* Summary Metrics */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             title="Total Strategies"
@@ -288,7 +479,6 @@ export default function Strategies() {
           />
         </div>
 
-        {/* Strategy Table */}
         <Card className="bg-card border-border">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -393,7 +583,7 @@ export default function Strategies() {
                           size="icon"
                           className="h-8 w-8"
                           title="View Details"
-                          onClick={() => setSelectedStrategy(strategy)}
+                          onClick={() => handleViewDetails(strategy)}
                         >
                           <Eye className="h-4 w-4" />
                         </Button>
@@ -406,9 +596,7 @@ export default function Strategies() {
           </CardContent>
         </Card>
 
-        {/* Strategy Performance Details */}
         <div className="grid gap-6 lg:grid-cols-2">
-          {/* Best Performing Strategy */}
           <Card className="bg-card border-border">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-primary">
@@ -455,7 +643,6 @@ export default function Strategies() {
             </CardContent>
           </Card>
 
-          {/* Strategy Type Distribution */}
           <Card className="bg-card border-border">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">

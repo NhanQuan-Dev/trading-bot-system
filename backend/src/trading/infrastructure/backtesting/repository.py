@@ -87,8 +87,8 @@ class BacktestRepository(IBacktestRepository):
             existing.end_time = backtest.completed_at
             existing.final_equity = backtest.final_equity
             existing.total_trades = backtest.total_trades
-            existing.win_rate = backtest.win_rate
-            existing.total_return = backtest.total_return
+            existing.win_rate = self._clamp_decimal(backtest.win_rate, max_val=100) if backtest.win_rate is not None else None
+            existing.total_return = self._clamp_decimal(backtest.total_return) if backtest.total_return is not None else None
             existing.error_message = backtest.error_message
         else:
             # Record doesn't exist - check if this is a new create or update to deleted record
@@ -102,6 +102,7 @@ class BacktestRepository(IBacktestRepository):
                 return backtest
             
             # Create new (initial save)
+            logger.info(f"DEBUG REPO: Saving Backtest {backtest.id} with Config Leverage: {backtest.config.leverage}")
             model = BacktestRunModel(
                 id=backtest.id,
                 user_id=backtest.user_id,
@@ -120,8 +121,8 @@ class BacktestRepository(IBacktestRepository):
                 end_time=backtest.completed_at,
                 final_equity=backtest.final_equity,
                 total_trades=backtest.total_trades,
-                win_rate=backtest.win_rate,
-                total_return=backtest.total_return,
+                win_rate=self._clamp_decimal(backtest.win_rate, max_val=100) if backtest.win_rate is not None else None,
+                total_return=self._clamp_decimal(backtest.total_return) if backtest.total_return is not None else None,
                 error_message=backtest.error_message,
             )
             self._session.add(model)
@@ -134,16 +135,16 @@ class BacktestRepository(IBacktestRepository):
             if existing:
                 existing.final_equity = backtest.results.final_equity
                 existing.total_trades = backtest.results.total_trades
-                existing.win_rate = backtest.results.win_rate
-                existing.total_return = backtest.results.total_return
+                existing.win_rate = self._clamp_decimal(backtest.results.win_rate, max_val=100)
+                existing.total_return = self._clamp_decimal(backtest.results.total_return)
             elif self._session.new:
                 # If we just added the model (it's new), update it
                 for obj in self._session.new:
                     if isinstance(obj, BacktestRunModel) and obj.id == backtest.id:
                         obj.final_equity = backtest.results.final_equity
                         obj.total_trades = backtest.results.total_trades
-                        obj.win_rate = backtest.results.win_rate
-                        obj.total_return = backtest.results.total_return
+                        obj.win_rate = self._clamp_decimal(backtest.results.win_rate, max_val=100)
+                        obj.total_return = self._clamp_decimal(backtest.results.total_return)
         
         await self._session.commit()
         return backtest
@@ -282,8 +283,12 @@ class BacktestRepository(IBacktestRepository):
                 commission=trade.entry_commission + trade.exit_commission,
                 slippage=trade.entry_slippage + trade.exit_slippage,
                 net_pnl=trade.net_pnl,
-                pnl_percent=trade.pnl_percent
+                pnl_percent=trade.pnl_percent,
+                entry_reason=_convert_decimals(trade.entry_reason),
+                exit_reason=_convert_decimals(trade.exit_reason)
             )
+            if trade.entry_reason:
+                 print(f"DEBUG REPO: Saving trade {trade.id} with entry_reason: {trade.entry_reason}")
             self._session.add(trade_model)
     
     async def get_by_id(self, backtest_id: UUID) -> Optional[BacktestRun]:
@@ -483,6 +488,7 @@ class BacktestRepository(IBacktestRepository):
         from ...domain.backtesting import BacktestConfig
         
         config = BacktestConfig(**model.config)
+        logger.info(f"DEBUG REPO: Loaded Backtest {model.id} Config Leverage: {config.leverage}")
         
         # Extract performance metrics from result if available
         profit_factor = None
@@ -508,6 +514,7 @@ class BacktestRepository(IBacktestRepository):
             progress_percent=model.progress_percent,
             start_date=model.start_date,
             end_date=model.end_date,
+            created_at=model.created_at,  # Map from DB
             started_at=model.start_time,
             completed_at=model.end_time,
             final_equity=model.final_equity,
@@ -557,7 +564,14 @@ class BacktestRepository(IBacktestRepository):
             
         if side:
             # Map side to direction
-            direction = "LONG" if side.lower() == "buy" else "SHORT"
+            s = side.lower()
+            if s in ("buy", "long"):
+                direction = "LONG"
+            elif s in ("sell", "short"):
+                direction = "SHORT"
+            else:
+                direction = s.upper() # Fallback
+            
             query = query.where(BacktestTradeModel.direction == direction)
             
         if min_pnl is not None:
@@ -607,7 +621,14 @@ class BacktestRepository(IBacktestRepository):
             query = query.where(BacktestTradeModel.symbol == symbol)
             
         if side:
-            direction = "LONG" if side.lower() == "buy" else "SHORT"
+            s = side.lower()
+            if s in ("buy", "long"):
+                direction = "LONG"
+            elif s in ("sell", "short"):
+                direction = "SHORT"
+            else:
+                direction = s.upper()
+                
             query = query.where(BacktestTradeModel.direction == direction)
             
         if min_pnl is not None:

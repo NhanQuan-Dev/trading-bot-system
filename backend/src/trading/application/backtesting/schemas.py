@@ -4,7 +4,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 from uuid import UUID
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+import dataclasses
 
 from ...domain.backtesting import (
     BacktestStatus,
@@ -25,6 +26,9 @@ class BacktestConfigRequest(BaseModel):
     start_date: datetime = Field(..., description="Backtest start date")
     end_date: datetime = Field(..., description="Backtest end date")
     initial_capital: Decimal = Field(..., description="Initial capital", gt=0)
+    
+    # Risk Management
+    leverage: int = Field(default=1, description="Leverage (1x to 125x)", ge=1, le=125)
     
     # Position sizing
     position_sizing: PositionSizing = Field(
@@ -58,6 +62,11 @@ class BacktestConfigRequest(BaseModel):
         description="Commission rate"
     )
     
+    # Advanced Costs
+    taker_fee_rate: Decimal = Field(default=Decimal("0.04"), description="Taker Fee %")
+    maker_fee_rate: Decimal = Field(default=Decimal("0.02"), description="Maker Fee %")
+    funding_rate_daily: Decimal = Field(default=Decimal("0.03"), description="Daily Funding Rate %")
+    
     # Backtest mode
     mode: BacktestMode = Field(
         default=BacktestMode.EVENT_DRIVEN,
@@ -77,7 +86,8 @@ class RunBacktestRequest(BaseModel):
     """Request to run a backtest."""
     
     strategy_id: UUID = Field(..., description="Strategy to test")
-    exchange_connection_id: UUID = Field(..., description="Exchange connection to use for candle data")
+    exchange_connection_id: Optional[UUID] = Field(None, description="Exchange connection to use (deprecated, use exchange_name)")
+    exchange_name: Optional[str] = Field(None, description="Exchange name (e.g., BINANCE)")
     config: BacktestConfigRequest = Field(..., description="Backtest configuration")
     strategy_code: Optional[str] = Field(
         default=None,
@@ -120,8 +130,16 @@ class BacktestRunResponse(BaseModel):
     sharpe_ratio: Optional[Decimal] = None
     
     created_at: datetime
+    config: Dict[str, Any]
     
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    @field_validator('config', mode='before')
+    @classmethod
+    def parse_config(cls, v):
+        if dataclasses.is_dataclass(v):
+            return dataclasses.asdict(v)
+        return v
 
 
 class PerformanceMetricsResponse(BaseModel):
@@ -178,6 +196,7 @@ class TradeResponse(BaseModel):
     mae: Optional[Decimal]
     mfe: Optional[Decimal]
     is_winner: bool
+    entry_reason: Optional[Dict[str, Any]] = None
     
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
@@ -226,3 +245,36 @@ class BacktestStatusResponse(BaseModel):
     message: Optional[str]
     
     model_config = ConfigDict(use_enum_values=True)
+
+
+class PeriodProfitStats(BaseModel):
+    """Profit statistics for a single period type."""
+    
+    avg_profit: float = Field(..., description="Average profit per period")
+    max_profit: float = Field(..., description="Maximum profit in a period")
+    min_profit: float = Field(..., description="Minimum profit in a period")
+
+
+class PeriodTradeStats(BaseModel):
+    """Trade count statistics for a single period type."""
+    
+    avg_trades: float = Field(..., description="Average trades per period")
+    max_trades: int = Field(..., description="Maximum trades in a period")
+    min_trades: int = Field(..., description="Minimum trades in a period")
+
+
+class BacktestPeriodStatsResponse(BaseModel):
+    """Period-based statistics for backtest."""
+    
+    # Profit stats per period
+    profit_day: PeriodProfitStats
+    profit_week: PeriodProfitStats
+    profit_month: PeriodProfitStats
+    profit_year: PeriodProfitStats
+    
+    # Trade stats per period
+    trades_day: PeriodTradeStats
+    trades_week: PeriodTradeStats
+    trades_month: PeriodTradeStats
+    trades_year: PeriodTradeStats
+

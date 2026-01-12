@@ -9,6 +9,7 @@ from ...shared.exceptions import (
 )
 from ...domain.bot import Strategy, StrategyType
 from ...domain.bot.repository import IStrategyRepository, IBotRepository
+from ...strategies.registry import registry # Integration for Hot Reload
 
 
 class CreateStrategyUseCase:
@@ -24,6 +25,7 @@ class CreateStrategyUseCase:
         strategy_type: StrategyType,
         description: str,
         parameters: Dict[str, Any],
+        code_content: Optional[str] = None,
     ) -> Strategy:
         """Create a new strategy."""
         
@@ -38,10 +40,23 @@ class CreateStrategyUseCase:
             strategy_type=strategy_type,
             description=description,
             parameters=parameters,
+            code_content=code_content,
         )
+        
+        # Validate Code if provided (Safety Layer 1)
+        if code_content:
+            try:
+                compile(code_content, '<string>', 'exec')
+            except SyntaxError as e:
+                raise ValidationError(f"Invalid Python Code: {e}")
         
         # Save strategy
         saved_strategy = await self.strategy_repository.save(strategy)
+        
+        # Hot Reload: Register immediately
+        if code_content:
+            registry.register_dynamic_strategy(code_content, name)
+            
         return saved_strategy
 
 
@@ -99,6 +114,7 @@ class UpdateStrategyUseCase:
         name: Optional[str] = None,
         description: Optional[str] = None,
         parameters: Optional[Dict[str, Any]] = None,
+        code_content: Optional[str] = None,
     ) -> Strategy:
         """Update a strategy."""
         
@@ -124,9 +140,23 @@ class UpdateStrategyUseCase:
         # Update parameters if provided
         if parameters is not None:
             strategy.update_parameters(parameters)
+            
+        # Update code content
+        if code_content is not None:
+            try:
+                # Pre-validation (Safety Layer 1)
+                compile(code_content, '<string>', 'exec')
+                strategy.code_content = code_content
+            except SyntaxError as e:
+                raise ValidationError(f"Invalid Python Code: {e}")
         
         # Save updated strategy
         updated_strategy = await self.strategy_repository.save(strategy)
+        
+        # Hot Reload if code changed
+        if code_content:
+            registry.register_dynamic_strategy(code_content, strategy.name)
+            
         return updated_strategy
 
 

@@ -1,83 +1,146 @@
-"""
-Backtest Strategy Adapter.
 
-This module provides an adapter to convert strategy implementations
-into the signal function format required by the BacktestEngine.
-"""
 from typing import Dict, Any, Optional, Callable, List
 from uuid import UUID
 import logging
+import asyncio
+from datetime import datetime
+
+# Import the registry to access dynamic strategies
+from .registry import registry
 
 logger = logging.getLogger(__name__)
 
 
-# Strategy ID to class name mapping (matches seed_strategies.py)
-STRATEGY_ID_TO_NAME = {
-    "00000000-0000-0000-0000-000000000001": "Grid Trading",
-    "00000000-0000-0000-0000-000000000002": "Momentum Strategy",
-    "00000000-0000-0000-0000-000000000003": "Mean Reversion",
-    "00000000-0000-0000-0000-000000000004": "Arbitrage",
-    "00000000-0000-0000-0000-000000000005": "Scalping",
-}
+# Strategy ID to class name mapping removed as per user request (legacy)
+
+
+
+# ... (Original imports)
+
 
 
 class BacktestStrategyAdapter:
     """
     Adapter that converts live trading strategies to backtest signal functions.
-    
-    Since live strategies use async on_tick with exchange gateway,
-    we need a simplified synchronous version for backtesting.
     """
     
-    def __init__(self, strategy_name: str, config: Dict[str, Any] = None):
+    def __init__(self, strategy_name: str, config: Dict[str, Any] = None, code_content: str = None):
         self.strategy_name = strategy_name
         self.config = config or {}
         self.history: List[Dict] = []
+        self.strategy_instance = None
+        self._init_error = None
+        
+        # 1. Start with Dynamic Loading (Priority)
+        if code_content:
+            try:
+                self._load_dynamic_strategy(code_content)
+                if self.strategy_instance:
+                    logger.info(f"Successfully loaded Custom Strategy from DB Code.")
+                    self._setup_strategy()
+                    return 
+            except Exception as e:
+                logger.error(f"Failed to load dynamic strategy: {e}")
+                self._init_error = f"Dynamic Load Error: {e}"
+                # Fallthrough to registry lookup
+        
+        # 2. Fallback to Registry Lookup (Legacy/File-based)
+        try:
+            cls = registry.get_strategy_class(strategy_name)
+            if cls:
+                # Minimal mock for exchange since backtest doesn't use it directly here
+                # but strategies might store it
+                class MockExchange:
+                    id = "backtest_sim"
+                
+                self.strategy_instance = cls(MockExchange(), self.config)
+                logger.info(f"Initialized Backtest Adapter with real strategy: {strategy_name}")
+            else:
+                msg = f"Strategy '{strategy_name}' not found. Available: {list(registry.strategies.keys())}"
+                logger.error(msg)
+                raise ValueError(msg)
+        except Exception as e:
+            logger.error(f"Could not instantiate strategy {strategy_name}: {e}")
+            raise RuntimeError(f"Failed to initialize strategy {strategy_name}: {e}")
+
         self._setup_strategy()
     
+    def _load_dynamic_strategy(self, code: str):
+        """Load strategy class from code string."""
+        import traceback
+        
+        # Try multiple import paths for StrategyBase (handles different execution contexts)
+        StrategyBase = None
+        try:
+            from ..base import StrategyBase
+        except ImportError:
+            try:
+                from trading.strategies.base import StrategyBase
+            except ImportError:
+                try:
+                    from src.trading.strategies.base import StrategyBase
+                except ImportError:
+                    from backend.src.trading.strategies.base import StrategyBase
+        
+        logger.info(f"[DynamicLoader] Attempting to load strategy from code ({len(code)} chars)")
+        
+        # Create isolated namespace with necessary context
+        namespace = {
+            'StrategyBase': StrategyBase,
+            'Decimal': __import__('decimal').Decimal,
+            'pd': __import__('pandas'),
+            'ta': __import__('pandas_ta'),
+            'np': __import__('numpy'),
+            'logging': __import__('logging'),
+            'logger': __import__('logging').getLogger('dynamic_strategy'),
+            'Optional': Optional,
+            'Dict': Dict,
+            'Any': Any,
+            'List': List,
+            'datetime': __import__('datetime').datetime,
+            'timedelta': __import__('datetime').timedelta,
+            'math': __import__('math'),
+        }
+        
+        try:
+            # Execute Code
+            exec(code, namespace)
+            logger.info(f"[DynamicLoader] Code executed successfully. Namespace keys: {list(namespace.keys())}")
+        except Exception as exec_err:
+            logger.error(f"[DynamicLoader] exec() failed: {exec_err}")
+            logger.error(f"[DynamicLoader] Traceback: {traceback.format_exc()}")
+            raise
+        
+        # Find Strategy Class
+        target_cls = None
+        for name, obj in namespace.items():
+            if isinstance(obj, type) and issubclass(obj, StrategyBase) and obj is not StrategyBase:
+                logger.info(f"[DynamicLoader] Found strategy class: {name}")
+                target_cls = obj
+                break
+                
+        if target_cls:
+            class MockExchange:
+                id = "backtest_sim"
+            self.strategy_instance = target_cls(MockExchange(), self.config)
+            logger.info(f"[DynamicLoader] Strategy instantiated successfully: {target_cls.name}")
+        else:
+            raise ValueError("No class inheriting from StrategyBase found in code.")
+
     def _setup_strategy(self):
         """Initialize strategy-specific parameters."""
-        if self.strategy_name == "Scalping":
-            self.ema_fast = int(self.config.get("ema_fast", 5))
-            self.ema_slow = int(self.config.get("ema_slow", 13))
-            self.min_history = self.ema_slow + 5
-            
-        elif self.strategy_name == "Grid Trading":
-            self.grid_levels = int(self.config.get("grid_levels", 10))
-            self.grid_step_pct = float(self.config.get("grid_step", 1.0))
-            self.last_grid_level = None
-            
-        elif self.strategy_name == "Mean Reversion":
-            self.bb_period = int(self.config.get("period", 20))
-            self.bb_std = float(self.config.get("std_dev", 2.0))
-            self.min_history = self.bb_period + 5
-            
-        elif self.strategy_name == "Momentum Strategy" or self.strategy_name == "Trend Following":
-            self.rsi_period = int(self.config.get("period", 14))
-            self.threshold = float(self.config.get("threshold", 2.0))
-            self.min_history = self.rsi_period + 5
-            
-        elif self.strategy_name == "Arbitrage":
-            # Arbitrage looks for price spreads - simplified for single symbol
-            self.min_spread = float(self.config.get("min_spread", 0.5))
-            self.min_history = 10
-            
+        if self.strategy_name == "HighFrequencyTest":
+             # Initialize params from config or defaults
+             self.tick_interval = 1
+             self.max_position = float(self.config.get("max_position", 0.01))
+             self.min_history = 1 # Needs very little history
+        
         else:
             # Default generic strategy
             self.min_history = 20
     
     def generate_signal(self, candle: Dict, idx: int, position: Optional[Dict]) -> Optional[Dict]:
-        """
-        Generate trading signal based on strategy logic.
-        
-        Args:
-            candle: Current candle data (open, high, low, close, volume, timestamp)
-            idx: Candle index in the sequence
-            position: Current open position or None
-            
-        Returns:
-            Signal dict {"type": "buy"|"sell"|"close"} or None
-        """
+        """Generate trading signal."""
         # Add candle to history
         self.history.append({
             "open": float(candle.get("open", 0)),
@@ -85,166 +148,153 @@ class BacktestStrategyAdapter:
             "low": float(candle.get("low", 0)),
             "close": float(candle.get("close", 0)),
             "volume": float(candle.get("volume", 0)),
+            "timestamp": candle.get("timestamp")
         })
         
         # Limit history size
         if len(self.history) > 200:
             self.history.pop(0)
         
+        # Use Dynamic Strategy Logic if available
+        if self.strategy_instance and hasattr(self.strategy_instance, 'calculate_signal'):
+             return self.strategy_instance.calculate_signal(candle, idx, position)
+
+        # Legacy Hardcoded Logic Fallbacks
+        
         # Need minimum history
         if len(self.history) < getattr(self, 'min_history', 20):
             return None
         
-        # Route to strategy-specific logic
-        if self.strategy_name == "Scalping":
-            return self._scalping_signal(position)
-        elif self.strategy_name == "Grid Trading":
-            return self._grid_trading_signal(position)
-        elif self.strategy_name == "Mean Reversion":
-            return self._mean_reversion_signal(position)
-        elif self.strategy_name in ("Momentum Strategy", "Trend Following"):
-            return self._momentum_signal(position)
-        elif self.strategy_name == "Arbitrage":
-            return self._arbitrage_signal(position)
+        # Route to logic
+        if self.strategy_name == "HighFrequencyTest":
+            return self._high_frequency_test_signal(position)
         else:
             return self._default_signal(idx, position)
-    
-    def _scalping_signal(self, position: Optional[Dict]) -> Optional[Dict]:
-        """Scalping: EMA crossover strategy."""
-        closes = [c["close"] for c in self.history]
+
+    def _high_frequency_test_signal(self, position: Optional[Any]) -> Optional[Dict]:
+        """
+        High Frequency Test specific logic reimplemented for Backtester.
+        Logic: Match high_frequency_test.py strictly (LONG/SHORT based).
+        """
+        # 1. Recover State (Mocking Strategy State)
+        pos_qty = 0.0
+        is_long = False
+        is_short = False
         
-        # Calculate EMAs
-        ema_fast = self._ema(closes, self.ema_fast)
-        ema_slow = self._ema(closes, self.ema_slow)
+        if position:
+            try:
+                # BacktestPosition uses strictly Uppercase LONG/SHORT now
+                pos_qty = float(position.quantity)
+                d_str = str(position.direction).upper() 
+                
+                if "LONG" in d_str:
+                    pos_qty = pos_qty # Positive
+                    is_long = True
+                else:
+                    pos_qty = -pos_qty # Negative
+                    is_short = True
+            except AttributeError:
+                pass
+
+        # Sync persistent state with strategy variable names
+        if not hasattr(self, '_hft_last_side'):
+             self._hft_last_side = None 
+
+        logger.info(f"DEBUG_HFT: pos_qty={pos_qty}, max_pos={self.max_position}, last_side={self._hft_last_side}")
+
+        # 2. Call Logic (Mirrors Strategy._determine_direction)
+        # Returns "LONG" or "SHORT"
+        direction = self._determine_direction(pos_qty)
         
-        if len(ema_fast) < 2 or len(ema_slow) < 2:
-            return None
-        
-        # Crossover detection
-        prev_fast, curr_fast = ema_fast[-2], ema_fast[-1]
-        prev_slow, curr_slow = ema_slow[-2], ema_slow[-1]
-        
-        # Fast crosses above slow -> BUY
-        if prev_fast <= prev_slow and curr_fast > curr_slow:
-            if not position:
-                return {"type": "buy"}
-        
-        # Fast crosses below slow -> CLOSE/SELL
-        elif prev_fast >= prev_slow and curr_fast < curr_slow:
-            if position:
-                return {"type": "close"}
-        
-        return None
-    
-    def _grid_trading_signal(self, position: Optional[Dict]) -> Optional[Dict]:
-        """Grid Trading: Buy/sell at price levels."""
-        if len(self.history) < 2:
+        if not direction:
             return None
             
-        current_price = self.history[-1]["close"]
-        prev_price = self.history[-2]["close"]
+        # 3. Map Strategy "Direction" to Backtest "Signal Type"
+        # IMPORTANT: Only update _hft_last_side when we actually OPEN a new position
+        # NOT when we close an existing one!
         
-        # Calculate grid level (simplified: based on percentage from starting price)
-        base_price = self.history[0]["close"]
-        step = base_price * (self.grid_step_pct / 100)
-        
-        current_level = int((current_price - base_price) / step) if step > 0 else 0
-        prev_level = int((prev_price - base_price) / step) if step > 0 else 0
-        
-        # Price crossed up a level -> SELL
-        if current_level > prev_level:
-            if position:
-                return {"type": "close"}
-        
-        # Price crossed down a level -> BUY
-        elif current_level < prev_level:
-            if not position:
-                return {"type": "buy"}
-        
+        if direction == "LONG":
+            if is_short: 
+                # Closing SHORT - do NOT update last_side yet
+                return {"type": "close_position"}
+            if not is_long:
+                # Actually opening LONG - NOW update last_side
+                self._hft_last_side = "LONG"
+                return {
+                    "type": "open_long",
+                    "metadata": {
+                        "reason": "Alternating Logic: Last was SHORT",
+                        "condition": "Position <= Max Limit",
+                        "algo_state": self._hft_last_side
+                    }
+                }
+            return None
+
+        elif direction == "SHORT":
+            if is_long:
+                # Closing LONG - do NOT update last_side yet
+                return {"type": "close_position"}
+            if not is_short:
+                # Actually opening SHORT - NOW update last_side
+                self._hft_last_side = "SHORT"
+                return {
+                    "type": "open_short",
+                    "metadata": {
+                        "reason": "Alternating Logic: Last was LONG",
+                        "condition": "Position >= Min Limit",
+                        "algo_state": self._hft_last_side
+                    }
+                }
+            return None
+            
         return None
+
+    def _determine_direction(self, current_pos_qty: float) -> Optional[str]:
+        """
+        Determine next trade direction based on current position and alternating logic.
+        Matches high_frequency_test.py _determine_direction exactly.
+        """
+        # Safety: Check position limits
+        if current_pos_qty >= self.max_position:
+            # Too much LONG position, must go SHORT
+            return "SHORT"
+        
+        if current_pos_qty <= -self.max_position:
+            # Too much SHORT position, must go LONG
+            return "LONG"
+        
+        # Alternating logic
+        if self._hft_last_side is None or self._hft_last_side == "SHORT":
+            return "LONG"
+        else:
+            return "SHORT"
+
+    # ... (Keep existing methods)
+
     
-    def _mean_reversion_signal(self, position: Optional[Dict]) -> Optional[Dict]:
-        """Mean Reversion: Buy at lower BB, sell at upper BB."""
-        closes = [c["close"] for c in self.history]
-        
-        if len(closes) < self.bb_period:
-            return None
-        
-        # Calculate Bollinger Bands
-        sma = sum(closes[-self.bb_period:]) / self.bb_period
-        variance = sum((c - sma) ** 2 for c in closes[-self.bb_period:]) / self.bb_period
-        std_dev = variance ** 0.5
-        
-        upper_band = sma + (self.bb_std * std_dev)
-        lower_band = sma - (self.bb_std * std_dev)
-        
-        current_price = closes[-1]
-        
-        # Price below lower band -> BUY
-        if current_price <= lower_band:
-            if not position:
-                return {"type": "buy"}
-        
-        # Price above upper band -> CLOSE
-        elif current_price >= upper_band:
-            if position:
-                return {"type": "close"}
-        
-        return None
+
+
     
-    def _momentum_signal(self, position: Optional[Dict]) -> Optional[Dict]:
-        """Momentum/Trend Following: RSI-based signals."""
-        closes = [c["close"] for c in self.history]
-        
-        if len(closes) < self.rsi_period + 1:
-            return None
-        
-        # Calculate RSI
-        rsi = self._rsi(closes, self.rsi_period)
-        
-        if rsi is None:
-            return None
-        
-        # RSI below 30 -> oversold -> BUY
-        if rsi < 30:
-            if not position:
-                return {"type": "buy"}
-        
-        # RSI above 70 -> overbought -> CLOSE
-        elif rsi > 70:
-            if position:
-                return {"type": "close"}
-        
-        return None
+
     
-    def _arbitrage_signal(self, position: Optional[Dict]) -> Optional[Dict]:
-        """Arbitrage: Look for price volatility (simplified for single symbol)."""
-        if len(self.history) < 10:
-            return None
-        
-        # Calculate recent volatility
-        closes = [c["close"] for c in self.history[-10:]]
-        avg_price = sum(closes) / len(closes)
-        current_price = closes[-1]
-        
-        deviation_pct = abs((current_price - avg_price) / avg_price) * 100
-        
-        # Large deviation from average -> take position
-        if deviation_pct > self.min_spread:
-            if current_price < avg_price and not position:
-                return {"type": "buy"}  # Buy the dip
-            elif current_price > avg_price and position:
-                return {"type": "close"}  # Sell the spike
-        
-        return None
     
     def _default_signal(self, idx: int, position: Optional[Dict]) -> Optional[Dict]:
         """Default fallback strategy."""
         # Simple periodic trading
         if idx % 20 == 0 and not position:
-            return {"type": "buy"}
+            metadata = {
+                 "reason": "Fallback Strategy (Generic)",
+                 "info": "The selected strategy failed to load or is not implemented."
+            }
+            if hasattr(self, '_init_error') and self._init_error:
+                metadata['error'] = str(self._init_error)
+                
+            return {
+                "type": "open_long",
+                "metadata": metadata
+            }
         elif idx % 25 == 0 and position:
-            return {"type": "close"}
+            return {"type": "close_position"}
         return None
     
     def _ema(self, data: List[float], period: int) -> List[float]:
@@ -286,20 +336,33 @@ class BacktestStrategyAdapter:
         return 100 - (100 / (1 + rs))
 
 
-def get_strategy_function(strategy_id: str, config: Dict[str, Any] = None) -> Callable:
+def get_strategy_function(strategy_id: str, strategy_name: str = None, config: Dict[str, Any] = None, code_content: str = None) -> Callable:
     """
     Factory function to get a backtest-compatible strategy function.
     
     Args:
         strategy_id: UUID string of the strategy
+        strategy_name: Name of the strategy to load (overrides config)
         config: Optional strategy configuration
         
     Returns:
         Callable that accepts (candle, idx, position) and returns signal dict or None
     """
-    strategy_name = STRATEGY_ID_TO_NAME.get(str(strategy_id), "Unknown")
-    logger.info(f"Creating backtest strategy adapter for: {strategy_name} (ID: {strategy_id})")
     
-    adapter = BacktestStrategyAdapter(strategy_name, config)
+    result_strategy_name = "Unknown" 
+    
+    if strategy_name:
+        result_strategy_name = strategy_name
+    elif config and "strategy_name" in config:
+        result_strategy_name = config["strategy_name"]
+    
+    # If the strategy is unknown, do not default to HighFrequencyTest.
+    # It will fallback to _default_signal in the adapter if not found in registry.
+    if result_strategy_name == "Unknown":
+        logger.warning(f"Strategy name not found for ID: {strategy_id}. Using default generic strategy.")
+
+    logger.info(f"Creating backtest strategy adapter for: {result_strategy_name} (ID: {strategy_id})")
+    
+    adapter = BacktestStrategyAdapter(result_strategy_name, config, code_content)
     
     return adapter.generate_signal

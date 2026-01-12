@@ -26,6 +26,9 @@ from ...application.backtesting.schemas import (
     BacktestResultsResponse,
     BacktestListResponse,
     BacktestStatusResponse,
+    BacktestPeriodStatsResponse,
+    PeriodProfitStats,
+    PeriodTradeStats,
 )
 from ...domain.backtesting import BacktestConfig, BacktestRun
 from ...domain.exchange import ExchangeType
@@ -59,6 +62,17 @@ def get_current_user_id(user: User = Depends(get_current_active_user)) -> UUID:
 
 
 
+@router.get("/available-exchanges")
+async def get_available_exchanges(
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get list of available exchanges for the user (for backtest selection)."""
+    repo = ExchangeRepository(db)
+    exchanges = await repo.get_available_exchanges(current_user.id)
+    return exchanges
+
+
 @router.post("", response_model=BacktestRunResponse, status_code=202)
 async def run_backtest(
     request: RunBacktestRequest,
@@ -74,6 +88,71 @@ async def run_backtest(
     
     try:
         user_id = current_user.id
+        exchange_repo = ExchangeRepository(repository._session)
+        
+        # Determine connection and exchange settings
+        exchange_connection = None
+        adapter = None
+        
+        if request.exchange_name:
+            # New Flow: User selected an Exchange (e.g. BINANCE)
+            try:
+                # Find ANY connection for this user and exchange type to satisfy DB FK
+                exchange_name_upper = request.exchange_name.upper()
+                connections = await exchange_repo.find_by_user_and_exchange(
+                    user_id, 
+                    ExchangeType(exchange_name_upper)
+                )
+                
+                if not connections:
+                     raise HTTPException(
+                        status_code=400,
+                        detail=f"No connection found for exchange {exchange_name_upper}. Please connect an account first."
+                    )
+                
+                # Use the first available connection for ID reference
+                exchange_connection = connections[0]
+                
+                # Force Mainnet Adapter (with empty keys for public data)
+                if exchange_connection.exchange_type == ExchangeType.BINANCE:
+                    adapter = BinanceAdapter(api_key="", api_secret="", testnet=False)
+                else:
+                    raise HTTPException(400, f"Exchange {exchange_name_upper} not supported for backtesting yet")
+                    
+            except ValueError:
+                 raise HTTPException(400, f"Invalid exchange name: {request.exchange_name}")
+                 
+        elif request.exchange_connection_id:
+            # Legacy Flow: User provided specific connection ID
+            exchange_connection = await exchange_repo.find_by_id(request.exchange_connection_id)
+            
+            if not exchange_connection:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Exchange connection {request.exchange_connection_id} not found"
+                )
+            
+            # Verify the connection belongs to the user
+            if exchange_connection.user_id != user_id:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Not authorized to use this exchange connection"
+                )
+                
+            # Force Mainnet Adapter here too (fix for bug where Testnet connection used Testnet data)
+            if exchange_connection.exchange_type == ExchangeType.BINANCE:
+                # Always use Mainnet data for backtesting, even if connection is Testnet
+                adapter = BinanceAdapter(api_key="", api_secret="", testnet=False)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Exchange type {exchange_connection.exchange_type} not yet supported for backtesting"
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either exchange_name or exchange_connection_id must be provided"
+            )
         
         # Convert request to domain config
         config = BacktestConfig(
@@ -86,8 +165,24 @@ async def run_backtest(
             slippage_model=request.config.slippage_model.value if hasattr(request.config.slippage_model, 'value') else request.config.slippage_model,
             slippage_percent=request.config.slippage_percent / 100,  # Convert percent to decimal
             commission_model=request.config.commission_model.value if hasattr(request.config.commission_model, 'value') else request.config.commission_model,
-            commission_percent=request.config.commission_rate / 100,  # API uses commission_rate, convert to percent
+            commission_percent=request.config.commission_rate / 100,  # Legacy
+            leverage=request.config.leverage,
+            taker_fee_rate=request.config.taker_fee_rate / 100,
+            maker_fee_rate=request.config.maker_fee_rate / 100,
+            funding_rate_daily=request.config.funding_rate_daily / 100,
         )
+        logger.info(f"DEBUG CONTROLLER: Created Config - Leverage: {config.leverage}, Taker: {config.taker_fee_rate}, Maker: {config.maker_fee_rate}, Funding: {config.funding_rate_daily}")
+        
+        # Fetch Strategy Name from DB
+        from ...infrastructure.persistence.models.bot_models import StrategyModel
+        from sqlalchemy import select
+        
+        stmt = select(StrategyModel).where(StrategyModel.id == request.strategy_id)
+        result = await repository._session.execute(stmt)
+        strategy_entity = result.scalars().first()
+        
+        # If strategy not found, it might fail FK constraint later, but for now default to Unknown
+        strategy_name_db = strategy_entity.name if strategy_entity else None
         
         # Load strategy function dynamically based on strategy_id
         from ...strategies.backtest_adapter import get_strategy_function
@@ -95,44 +190,23 @@ async def run_backtest(
         # Get strategy parameters from config if available
         strategy_config = getattr(request.config, 'strategy_params', None) or {}
         
+        # Check if we have a type from DB
+        strategy_type = strategy_entity.strategy_type if strategy_entity else None
+        strategy_code = strategy_entity.code_content if strategy_entity else None
+        
+        # Use strategy name from DB directly (No magic mapping)
+        strategy_implementation_name = strategy_name_db
+
+        logger.info(f"Loading strategy for backtest. ID: {request.strategy_id}, Name: {strategy_name_db}, Has Code: {bool(strategy_code)}")
+
         strategy_func = get_strategy_function(
             strategy_id=str(request.strategy_id),
-            config=strategy_config
+            strategy_name=strategy_implementation_name,
+            config=strategy_config,
+            code_content=strategy_code
         )
         
         logger.info(f"Loaded strategy function for ID: {request.strategy_id}")
-        
-        # Lookup exchange connection and create appropriate adapter
-        exchange_repo = ExchangeRepository(repository._session)
-        exchange_connection = await exchange_repo.find_by_id(request.exchange_connection_id)
-        
-        if not exchange_connection:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Exchange connection {request.exchange_connection_id} not found"
-            )
-        
-        # Verify the connection belongs to the user
-        if exchange_connection.user_id != user_id:
-            raise HTTPException(
-                status_code=403, 
-                detail="Not authorized to use this exchange connection"
-            )
-        
-        # Get API credentials from connection
-        api_key = exchange_connection.credentials.api_key
-        api_secret = exchange_connection.credentials.secret_key
-        is_testnet = exchange_connection.is_testnet
-        
-        # Create adapter based on exchange type
-        if exchange_connection.exchange_type == ExchangeType.BINANCE:
-            adapter = BinanceAdapter(api_key=api_key, api_secret=api_secret, testnet=is_testnet)
-        else:
-            # For unsupported exchanges, raise error
-            raise HTTPException(
-                status_code=400,
-                detail=f"Exchange type {exchange_connection.exchange_type} not yet supported for backtesting"
-            )
         
         # Instantiate dependencies for MarketDataService
         candle_repo = CandleRepository(repository._session)
@@ -150,14 +224,20 @@ async def run_backtest(
 
         
         # Create backtest run entity FIRST (before background task)
-    # Create BacktestRun entity
+        # Create BacktestRun entity
         backtest_id = uuid.uuid4()
         backtest_run = BacktestRun(
             id=backtest_id,
             user_id=current_user.id,
             strategy_id=request.strategy_id,
-            exchange_connection_id=request.exchange_connection_id,
-            exchange_name=exchange_connection.name,
+            exchange_connection_id=exchange_connection.id,
+            exchange_name=exchange_connection.name, # This might be the connection name, maybe we want just "BINANCE"? 
+            # Domain entity allows exchange_name to be set. 
+            # If we want generic name, we can set it here, but BacktestRunModel might not store it explicitly distinct from relation.
+            # But BacktestRun domain object has it. 
+            # Let's keep connection name for provenance, but config/schema response can show generic if needed?
+            # Schema response has exchange_name.
+            
             symbol=request.config.symbol,
             timeframe=request.config.timeframe,
             start_date=request.config.start_date,
@@ -188,9 +268,6 @@ async def run_backtest(
                 logger.error(f"Backtest task failed: {str(e)}")
                 import traceback
                 traceback.print_exc()
-        
-        
-        
         
         
         background_tasks.add_task(run_backtest_task)
@@ -426,6 +503,14 @@ async def get_backtest_trades(
             max_pnl=max_pnl
         )
         
+        # Verify exit reason data
+        if trades and trades[0].exit_reason:
+             print(f"DEBUG API PRINT: Sending {len(trades)} trades. Sample exit_reason: {trades[0].exit_reason}")
+             logger.info(f"DEBUG API: Sending {len(trades)} trades. Sample exit_reason: {trades[0].exit_reason}")
+        elif trades:
+             print(f"DEBUG API PRINT: Sending {len(trades)} trades. First trade exit_reason is NONE/EMPTY.")
+             logger.warning(f"DEBUG API: Sending {len(trades)} trades. First trade exit_reason is NONE/EMPTY.")
+
         return {
             "trades": [
                 {
@@ -440,6 +525,8 @@ async def get_backtest_trades(
                     "duration": trade.duration_seconds if hasattr(trade, 'duration_seconds') else None,
                     "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
                     "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
+                    "entry_reason": trade.entry_reason,
+                    "exit_reason": trade.exit_reason,
                 }
                 for trade in trades
             ],
@@ -633,3 +720,119 @@ async def export_backtest_csv(
     except Exception as e:
         logger.error(f"Failed to export backtest CSV: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{backtest_id}/period-stats", response_model=BacktestPeriodStatsResponse)
+async def get_backtest_period_stats(
+    backtest_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    repository: BacktestRepository = Depends(get_backtest_repository),
+):
+    """
+    Get period-based statistics for backtest.
+    
+    Returns profit and trade statistics grouped by day/week/month/year.
+    """
+    
+    # Verify backtest exists and ownership
+    use_case = GetBacktestUseCase(repository)
+    backtest_run = await use_case.execute(backtest_id)
+    
+    if not backtest_run:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    
+    if backtest_run.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    try:
+        # Get all trades for this backtest
+        trades = await repository.get_backtest_trades(
+            backtest_id=backtest_id,
+            page=1,
+            limit=100000  # Get all trades
+        )
+        
+        if not trades:
+            # Return zeros if no trades
+            empty_profit = PeriodProfitStats(avg_profit=0.0, max_profit=0.0, min_profit=0.0)
+            empty_trades = PeriodTradeStats(avg_trades=0.0, max_trades=0, min_trades=0)
+            return BacktestPeriodStatsResponse(
+                profit_day=empty_profit, profit_week=empty_profit,
+                profit_month=empty_profit, profit_year=empty_profit,
+                trades_day=empty_trades, trades_week=empty_trades,
+                trades_month=empty_trades, trades_year=empty_trades,
+            )
+        
+        from collections import defaultdict
+        
+        def get_iso_week(dt):
+            """Get ISO week number."""
+            return dt.isocalendar()[1]
+        
+        def get_period_key(entry_time, period: str) -> str:
+            """Get period key from datetime."""
+            if period == 'day':
+                return entry_time.strftime('%Y-%m-%d')
+            elif period == 'week':
+                return f"{entry_time.year}-W{get_iso_week(entry_time):02d}"
+            elif period == 'month':
+                return entry_time.strftime('%Y-%m')
+            elif period == 'year':
+                return str(entry_time.year)
+            return ''
+        
+        def calculate_period_stats(trades_list, period: str):
+            """Calculate stats for a period type."""
+            period_data = defaultdict(lambda: {'profit': 0.0, 'trades': 0})
+            
+            for trade in trades_list:
+                if trade.entry_time:
+                    key = get_period_key(trade.entry_time, period)
+                    pnl = float(trade.net_pnl) if trade.net_pnl else 0.0
+                    period_data[key]['profit'] += pnl
+                    period_data[key]['trades'] += 1
+            
+            if not period_data:
+                return (
+                    PeriodProfitStats(avg_profit=0.0, max_profit=0.0, min_profit=0.0),
+                    PeriodTradeStats(avg_trades=0.0, max_trades=0, min_trades=0)
+                )
+            
+            profits = [v['profit'] for v in period_data.values()]
+            trade_counts = [v['trades'] for v in period_data.values()]
+            
+            profit_stats = PeriodProfitStats(
+                avg_profit=sum(profits) / len(profits),
+                max_profit=max(profits),
+                min_profit=min(profits),
+            )
+            
+            trade_stats = PeriodTradeStats(
+                avg_trades=sum(trade_counts) / len(trade_counts),
+                max_trades=max(trade_counts),
+                min_trades=min(trade_counts),
+            )
+            
+            return profit_stats, trade_stats
+        
+        # Calculate for each period type
+        day_profit, day_trades = calculate_period_stats(trades, 'day')
+        week_profit, week_trades = calculate_period_stats(trades, 'week')
+        month_profit, month_trades = calculate_period_stats(trades, 'month')
+        year_profit, year_trades = calculate_period_stats(trades, 'year')
+        
+        return BacktestPeriodStatsResponse(
+            profit_day=day_profit,
+            profit_week=week_profit,
+            profit_month=month_profit,
+            profit_year=year_profit,
+            trades_day=day_trades,
+            trades_week=week_trades,
+            trades_month=month_trades,
+            trades_year=year_trades,
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get period stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+

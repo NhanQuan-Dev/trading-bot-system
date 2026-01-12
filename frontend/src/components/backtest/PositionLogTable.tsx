@@ -10,13 +10,21 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Download } from 'lucide-react';
+import { Download, Eye } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 
 interface Trade {
     trade_id: string;
     symbol: string;
-    side: 'BUY' | 'SELL';
+    side: string;
     entry_time: string;
     entry_price: number;
     exit_time: string;
@@ -25,6 +33,8 @@ interface Trade {
     pnl: number;
     pnl_percent: number;
     status: string;
+    entry_reason?: Record<string, any>;
+    exit_reason?: Record<string, any>;
 }
 
 interface PositionLogTableProps {
@@ -36,6 +46,9 @@ export const PositionLogTable = React.memo(({ trades }: PositionLogTableProps) =
     const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
     const [page, setPage] = useState(1);
     const pageSize = 20;
+
+    // Entry Reason Dialog State
+    const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
 
     // Sorting Logic
     const sortedTrades = useMemo(() => {
@@ -117,122 +130,195 @@ export const PositionLogTable = React.memo(({ trades }: PositionLogTableProps) =
     }
 
     return (
-        <Card>
-            <CardHeader>
-                <div className="flex items-center justify-between">
-                    <div>
-                        <CardTitle>Position Log</CardTitle>
-                        <CardDescription>
-                            Detailed history of all executed trades ({trades.length} items)
-                        </CardDescription>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm" onClick={exportCsv}>
-                            <Download className="mr-2 h-4 w-4" />
-                            Export CSV
-                        </Button>
-                    </div>
+        <Card className="border-border bg-card">
+            <CardHeader className="flex flex-row items-center justify-between">
+                <div>
+                    <CardTitle>Position Log</CardTitle>
+                    <CardDescription>Detailed history of all executed trades ({trades.length} items)</CardDescription>
                 </div>
+                <Button variant="outline" size="sm" onClick={exportCsv} className="gap-2">
+                    <Download className="h-4 w-4" />
+                    Export CSV
+                </Button>
             </CardHeader>
             <CardContent>
-                <div className="rounded-md border">
+                <div className="rounded-md border border-border">
                     <Table>
                         <TableHeader>
-                            <TableRow>
-                                <TableHead className="cursor-pointer" onClick={() => handleSort('entry_time')}>
+                            <TableRow className="border-border hover:bg-transparent">
+                                <TableHead className="cursor-pointer hover:text-primary" onClick={() => handleSort('entry_time')}>
                                     Entry Time {sortColumn === 'entry_time' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="cursor-pointer" onClick={() => handleSort('symbol')}>
+                                <TableHead className="cursor-pointer hover:text-primary" onClick={() => handleSort('symbol')}>
                                     Symbol {sortColumn === 'symbol' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="cursor-pointer" onClick={() => handleSort('side')}>
+                                <TableHead className="cursor-pointer hover:text-primary text-center" onClick={() => handleSort('side')}>
                                     Side {sortColumn === 'side' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="cursor-pointer text-right" onClick={() => handleSort('entry_price')}>
+                                <TableHead className="cursor-pointer hover:text-primary text-right" onClick={() => handleSort('entry_price')}>
                                     Entry Price {sortColumn === 'entry_price' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="cursor-pointer" onClick={() => handleSort('exit_time')}>
-                                    Exit Time {sortColumn === 'exit_time' && (sortDirection === 'asc' ? '↑' : '↓')}
-                                </TableHead>
-                                <TableHead className="cursor-pointer text-right" onClick={() => handleSort('exit_price')}>
+                                <TableHead className="text-right">Exit Time</TableHead>
+                                <TableHead className="cursor-pointer hover:text-primary text-right" onClick={() => handleSort('exit_price')}>
                                     Exit Price {sortColumn === 'exit_price' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="text-right">
-                                    Duration
-                                </TableHead>
-                                <TableHead className="cursor-pointer text-right" onClick={() => handleSort('quantity')}>
+                                <TableHead className="text-right">Duration</TableHead>
+                                <TableHead className="cursor-pointer hover:text-primary text-right" onClick={() => handleSort('quantity')}>
                                     Size {sortColumn === 'quantity' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
-                                <TableHead className="cursor-pointer text-right" onClick={() => handleSort('pnl')}>
+                                <TableHead className="cursor-pointer hover:text-primary text-right" onClick={() => handleSort('pnl')}>
                                     PnL {sortColumn === 'pnl' && (sortDirection === 'asc' ? '↑' : '↓')}
                                 </TableHead>
+                                <TableHead className="text-center w-[80px]">Actions</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {paginatedTrades.map((trade) => (
-                                <TableRow key={trade.trade_id}>
-                                    <TableCell>{new Date(trade.entry_time).toLocaleString()}</TableCell>
-                                    <TableCell className="font-medium">{trade.symbol}</TableCell>
-                                    <TableCell>
-                                        <Badge variant={trade.side === 'BUY' ? 'default' : 'destructive'}>
-                                            {trade.side}
-                                        </Badge>
-                                    </TableCell>
-                                    <TableCell className="text-right">${trade.entry_price.toLocaleString()}</TableCell>
-                                    <TableCell>{trade.exit_time ? new Date(trade.exit_time).toLocaleString() : '-'}</TableCell>
-                                    <TableCell className="text-right">
-                                        {trade.exit_price ? `$${trade.exit_price.toLocaleString()}` : '-'}
-                                    </TableCell>
-                                    <TableCell className="text-right">
-                                        {(() => {
-                                            if (!trade.exit_time || !trade.entry_time) return '-';
-                                            const diff = new Date(trade.exit_time).getTime() - new Date(trade.entry_time).getTime();
-                                            const sec = Math.floor(diff / 1000);
-                                            const min = Math.floor(sec / 60);
-                                            const hr = Math.floor(min / 60);
-                                            const days = Math.floor(hr / 24);
-
-                                            if (days > 0) return `${days}d ${hr % 24}h`;
-                                            if (hr > 0) return `${hr}h ${min % 60}m`;
-                                            if (min > 0) return `${min}m ${sec % 60}s`;
-                                            return `${sec}s`;
-                                        })()}
-                                    </TableCell>
-                                    <TableCell className="text-right">{trade.quantity}</TableCell>
-                                    <TableCell className={cn(
-                                        "text-right font-medium",
-                                        trade.pnl > 0 ? "text-green-600" : trade.pnl < 0 ? "text-red-600" : ""
-                                    )}>
-                                        {trade.pnl > 0 ? '+' : ''}{trade.pnl.toLocaleString()} ({trade.pnl_percent.toFixed(2)}%)
+                            {paginatedTrades.length === 0 ? (
+                                <TableRow>
+                                    <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
+                                        No trades recorded yet.
                                     </TableCell>
                                 </TableRow>
-                            ))}
+                            ) : (
+                                paginatedTrades.map((trade) => {
+                                    // Calculate duration for display
+                                    // Parse ISO dates
+                                    const entryDate = new Date(trade.entry_time);
+                                    const exitDate = new Date(trade.exit_time);
+                                    const durationMs = exitDate.getTime() - entryDate.getTime();
+                                    const durationSec = Math.floor(durationMs / 1000);
+
+                                    let durationStr = `${durationSec}s`;
+                                    if (durationSec > 60) {
+                                        const mins = Math.floor(durationSec / 60);
+                                        durationStr = `${mins}m ${durationSec % 60}s`;
+                                        if (mins > 60) {
+                                            const hours = Math.floor(mins / 60);
+                                            durationStr = `${hours}h ${mins % 60}m`;
+                                        }
+                                    }
+
+                                    const isWin = trade.pnl > 0;
+
+                                    return (
+                                        <TableRow key={trade.trade_id || Math.random()} className="border-border hover:bg-muted/50">
+                                            <TableCell className="font-mono text-xs text-muted-foreground whitespace-nowrap">
+                                                {entryDate.toLocaleString()}
+                                            </TableCell>
+                                            <TableCell className="font-medium">{trade.symbol}</TableCell>
+                                            <TableCell className="text-center">
+                                                <Badge
+                                                    variant="secondary"
+                                                    className={cn(
+                                                        "font-mono text-xs uppercase w-16 justify-center",
+                                                        (trade.side?.toLowerCase() === 'long' || trade.side?.toLowerCase() === 'buy') ? "bg-green-500/10 text-green-500 border-green-500/20" : "bg-red-500/10 text-red-500 border-red-500/20"
+                                                    )}
+                                                >
+                                                    {(trade.side?.toLowerCase()) === 'long' || trade.side?.toLowerCase() === 'buy' ? 'LONG' : 'SHORT'}
+                                                </Badge>
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono text-xs">
+                                                ${trade.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono text-xs text-muted-foreground whitespace-nowrap">
+                                                {exitDate.toLocaleString()}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono text-xs">
+                                                ${trade.exit_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                                                {durationStr}
+                                            </TableCell>
+                                            <TableCell className="text-right font-mono text-xs">
+                                                {trade.quantity.toFixed(8)}
+                                            </TableCell>
+                                            <TableCell className="text-right">
+                                                <span className={cn(
+                                                    "font-mono text-xs font-medium",
+                                                    isWin ? "text-green-500" : "text-red-500"
+                                                )}>
+                                                    {isWin ? "+" : ""}{trade.pnl.toFixed(3)} ({trade.pnl_percent.toFixed(2)}%)
+                                                </span>
+                                            </TableCell>
+                                            <TableCell className="text-center">
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className="h-8 w-8 text-muted-foreground hover:text-primary"
+                                                    onClick={() => setSelectedTrade(trade)}
+                                                >
+                                                    <Eye className="h-4 w-4" />
+                                                </Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    );
+                                })
+                            )}
                         </TableBody>
                     </Table>
                 </div>
-                {/* Pagination Controls */}
-                <div className="flex items-center justify-end space-x-2 py-4">
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(p => Math.max(1, p - 1))}
-                        disabled={page === 1}
-                    >
-                        Previous
-                    </Button>
-                    <div className="text-sm text-gray-500">
-                        Page {page} of {Math.max(1, totalPages)}
-                    </div>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                        disabled={page >= totalPages}
-                    >
-                        Next
-                    </Button>
+                {/* Pagination Controls could be added here */}
+                <div className="flex justify-end p-2 gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>Previous</Button>
+                    <span className="text-sm py-2 px-2 text-muted-foreground">Page {page} of {totalPages || 1}</span>
+                    <Button variant="outline" size="sm" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages || totalPages === 0}>Next</Button>
                 </div>
             </CardContent>
+
+            <Dialog open={!!selectedTrade} onOpenChange={(open) => !open && setSelectedTrade(null)}>
+                <DialogContent className="max-w-[600px] max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle>Trade Entry Details</DialogTitle>
+                        <DialogDescription>
+                            Technical conditions triggering this {selectedTrade?.side} position on {selectedTrade?.symbol}
+                        </DialogDescription>
+                    </DialogHeader>
+                    {selectedTrade && (
+                        <div className="space-y-4 py-4">
+                            <div className="grid grid-cols-2 gap-4 text-sm">
+                                <div className="space-y-1">
+                                    <Label className="text-muted-foreground">Entry Time</Label>
+                                    <p className="font-mono">{new Date(selectedTrade.entry_time).toLocaleString()}</p>
+                                </div>
+                                <div className="space-y-1">
+                                    <Label className="text-muted-foreground">Entry Price</Label>
+                                    <p className="font-mono">${selectedTrade.entry_price}</p>
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label>Entry Reason & Indicators</Label>
+                                {selectedTrade.entry_reason ? (
+                                    <div className="bg-muted/50 p-4 rounded-md overflow-x-auto border border-border">
+                                        <pre className="text-xs font-mono">
+                                            {JSON.stringify(selectedTrade.entry_reason, null, 2)}
+                                        </pre>
+                                    </div>
+                                ) : (
+                                    <div className="bg-muted/20 p-4 rounded-md text-center text-muted-foreground text-xs border border-dashed">
+                                        No entry metadata.
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label>Exit Reason & Indicators</Label>
+                                {selectedTrade.exit_reason ? (
+                                    <div className="bg-muted/50 p-4 rounded-md overflow-x-auto border border-border">
+                                        <pre className="text-xs font-mono">
+                                            {JSON.stringify(selectedTrade.exit_reason, null, 2)}
+                                        </pre>
+                                    </div>
+                                ) : (
+                                    <div className="bg-muted/20 p-4 rounded-md text-center text-muted-foreground text-xs border border-dashed">
+                                        No exit metadata.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </DialogContent>
+            </Dialog>
         </Card>
     );
 });

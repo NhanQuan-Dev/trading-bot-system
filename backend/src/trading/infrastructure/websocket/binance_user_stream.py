@@ -278,7 +278,16 @@ class BinanceUserStreamService:
                         "leverage": pos.leverage or 1,
                         "margin_type": pos.margin_type,
                         "isolated_wallet": float(getattr(pos, 'isolated_wallet', 0) or 0),
+                        # === NEW FIELDS ===
+                        "break_even_price": float(getattr(pos, 'break_even_price', 0) or 0),
+                        "liquidation_price": float(getattr(pos, 'liquidation_price', 0) or 0),
+                        "position_initial_margin": float(getattr(pos, 'position_initial_margin', 0) or 0),
+                        "maint_margin": float(getattr(pos, 'maint_margin', 0) or 0),
+                        "margin_asset": "USDT",
                     }
+                    
+                    # Trigger risk data fetch for liquidation price, etc.
+                    asyncio.create_task(self._refresh_position_risk_data(bot_id, normalized_s, pos.side, adapter))
                     
             logger.info(f"Cached {len(self.cached_positions.get(bot_id, {}))} positions for bot {bot_id}")
             
@@ -306,9 +315,12 @@ class BinanceUserStreamService:
                 
             # Update mark price
             # Update mark price
+            # Update mark price
             position["mark_price"] = float(mark_price)
         
-            # Recalculate Unrealized PnL
+            # Recalculate Unrealized PnL based on live Mark Price
+            # Note: ACCOUNT_UPDATE only sends PnL on trade/balance events, not for price fluctuations.
+            # To show real-time PnL, we must calculate it here.
             entry_price = Decimal(str(position["entry_price"]))
             quantity = Decimal(str(position["quantity"]))
             side = position["side"]
@@ -331,6 +343,9 @@ class BinanceUserStreamService:
                 if side in ["SHORT", "SELL"]:
                     diff_pct = -diff_pct
                 position["unrealized_pnl_pct"] = float(diff_pct * leverage)
+            
+            # Update timestamp
+            position["timestamp"] = datetime.utcnow().isoformat()
             
             position["timestamp"] = datetime.utcnow().isoformat()
             
@@ -409,6 +424,69 @@ class BinanceUserStreamService:
                 
         except Exception as e:
             logger.error(f"Failed to refresh leverage for {symbol}: {e}")
+
+    async def _refresh_position_risk_data(self, bot_id: str, symbol: str, side: str, adapter: BinanceAdapter):
+        """Fetch position risk data to get liquidation price, maint margin, and break-even price."""
+        try:
+            # Wait a moment for position to be fully established on exchange
+            await asyncio.sleep(0.5)
+            risk_data = await adapter.get_position_risk(symbol)
+            
+            if not risk_data:
+                return
+                
+            bot_positions = self.cached_positions.get(bot_id, {})
+            cache_key = f"{symbol}_{side}"
+            
+            if cache_key not in bot_positions:
+                return
+                
+            position = bot_positions[cache_key]
+            updated = False
+            
+            # Position risk API returns list with entries for each position side
+            for risk in risk_data:
+                risk_side = risk.get("positionSide", "BOTH")
+                
+                # Log raw risk data for debugging
+                logger.info(f"Raw Position Risk data for {symbol}: {risk}")
+                
+                # Match side (BOTH maps to our side)
+                if risk_side == side or (risk_side == "BOTH" and side in ["LONG", "SHORT"]):
+                    # Update liquidation price
+                    liq_price = float(risk.get("liquidationPrice", 0) or 0)
+                    if liq_price > 0:
+                        position["liquidation_price"] = liq_price
+                        updated = True
+                    
+                    # Update maint margin
+                    maint_margin = float(risk.get("maintMargin", 0) or 0)
+                    position["maint_margin"] = maint_margin
+                    
+                    # Update position initial margin - Use 'isolatedWallet' (11.74) not 'isolatedMargin' (11.32)
+                    isolated_wallet = float(risk.get("isolatedWallet", 0) or risk.get("isolatedMargin", 0) or 0)
+                    if isolated_wallet > 0:
+                        position["position_initial_margin"] = isolated_wallet
+                        position["isolated_wallet"] = isolated_wallet
+                    
+                    # Update break-even price if available
+                    break_even = float(risk.get("breakEvenPrice", 0) or 0)
+                    if break_even > 0:
+                        position["break_even_price"] = break_even
+                    
+                    # Update leverage and margin type
+                    position["leverage"] = int(risk.get("leverage", position.get("leverage", 1)))
+                    position["margin_type"] = risk.get("marginType", position.get("margin_type"))
+                    
+                    updated = True
+                    break
+            
+            if updated:
+                logger.info(f"Refreshed risk data for {cache_key} on bot {bot_id}: liq={position.get('liquidation_price')}, bep={position.get('break_even_price')}, maint={position.get('maint_margin')}, initMargin={position.get('position_initial_margin')}")
+                await self._push_positions_update(bot_id)
+                
+        except Exception as e:
+            logger.error(f"Failed to refresh position risk data for {symbol}: {e}")
 
     async def _push_positions_update(self, bot_id: str):
         """Push current cached positions to frontend via WebSocket."""
@@ -504,8 +582,18 @@ class BinanceUserStreamService:
                     "leverage": leverage,
                     "margin_type": p.get("mt"),
                     "isolated_wallet": float(isolated_wallet),
+                    # === NEW FIELDS ===
+                    "break_even_price": float(Decimal(p.get("bep", "0"))),  # Break-even price
+                    "position_initial_margin": float(Decimal(p.get("iw", "0"))),  # Initial margin (same as isolated_wallet for isolated)
+                    "maint_margin": existing_pos.get("maint_margin", 0.0),  # Will be fetched from Position Risk
+                    "liquidation_price": existing_pos.get("liquidation_price", 0.0),  # Will be fetched from Position Risk
+                    "margin_asset": "USDT",  # Default, can be updated
                     "timestamp": datetime.utcnow().isoformat()
                 }
+                
+                # If new position or missing liquidation data, fetch from Position Risk API
+                if not existing_pos.get("liquidation_price"):
+                    asyncio.create_task(self._refresh_position_risk_data(bot_id, p["s"], side, adapter))
             else:
                 # Position closed - remove from cache
                 # We need to know side to remove specific position in Hedge Mode

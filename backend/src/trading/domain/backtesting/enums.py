@@ -46,8 +46,8 @@ class PositionSizing(str, Enum):
 
 class TradeDirection(str, Enum):
     """Trade direction."""
-    LONG = "long"
-    SHORT = "short"
+    LONG = "LONG"
+    SHORT = "SHORT"
 
 
 class ExitReason(str, Enum):

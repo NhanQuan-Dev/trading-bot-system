@@ -174,3 +174,84 @@ class BotStatsService:
         except Exception as e:
             logger.error(f"Failed to get bot stats for {bot_id}: {e}")
             return None
+
+    async def get_period_stats(self, bot_id: str) -> Optional[dict]:
+        """
+        Get stats for multiple time periods.
+        
+        Returns dict with period keys containing:
+        - pnl: Total P&L for the period
+        - trades: Number of trades
+        - wins: Number of winning trades (P&L > 0)
+        - losses: Number of losing trades (P&L <= 0)
+        
+        Periods: today, yesterday, this_week, last_week, this_month, last_month
+        """
+        from datetime import datetime, timedelta
+        from sqlalchemy import func, case, and_
+        from ...infrastructure.persistence.models.trading_models import TradeModel
+        
+        try:
+            bot_uuid = uuid.UUID(bot_id)
+            
+            # Get current date boundaries (using UTC for consistency)
+            now = datetime.utcnow()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_start = today_start - timedelta(days=1)
+            
+            # Week boundaries (Monday = 0)
+            days_since_monday = now.weekday()
+            this_week_start = today_start - timedelta(days=days_since_monday)
+            last_week_start = this_week_start - timedelta(days=7)
+            last_week_end = this_week_start
+            
+            # Month boundaries
+            this_month_start = today_start.replace(day=1)
+            # Last month: go back to first of current month, then subtract 1 day to get last month, then get first of that month
+            last_month_end = this_month_start
+            last_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+            
+            # Define period boundaries
+            periods = {
+                "today": (today_start, now),
+                "yesterday": (yesterday_start, today_start),
+                "this_week": (this_week_start, now),
+                "last_week": (last_week_start, last_week_end),
+                "this_month": (this_month_start, now),
+                "last_month": (last_month_start, last_month_end),
+            }
+            
+            result = {}
+            
+            for period_name, (start_time, end_time) in periods.items():
+                # Query trades for this period
+                stmt = select(
+                    func.coalesce(func.sum(TradeModel.pnl), 0).label("total_pnl"),
+                    func.count(TradeModel.id).label("total_trades"),
+                    func.coalesce(func.sum(case((TradeModel.pnl > 0, 1), else_=0)), 0).label("wins"),
+                    func.coalesce(func.sum(case((TradeModel.pnl <= 0, 1), else_=0)), 0).label("losses"),
+                ).where(
+                    and_(
+                        TradeModel.bot_id == bot_uuid,
+                        TradeModel.executed_at >= start_time,
+                        TradeModel.executed_at < end_time,
+                    )
+                )
+                
+                query_result = await self._session.execute(stmt)
+                row = query_result.one()
+                
+                result[period_name] = {
+                    "pnl": float(row.total_pnl or 0),
+                    "trades": int(row.total_trades or 0),
+                    "wins": int(row.wins or 0),
+                    "losses": int(row.losses or 0),
+                }
+            
+            logger.debug(f"Period stats for bot {bot_id}: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get period stats for {bot_id}: {e}")
+            return None
+

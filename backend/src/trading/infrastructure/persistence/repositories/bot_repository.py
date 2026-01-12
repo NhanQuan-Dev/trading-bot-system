@@ -292,6 +292,7 @@ class StrategyRepository(IStrategyRepository):
             updated_at=model.updated_at,
             backtest_results=model.backtest_results,
             live_performance=live_performance,
+            code_content=model.code_content,
         )
     
     def _domain_to_model_data(self, strategy: Strategy) -> dict:
@@ -320,6 +321,7 @@ class StrategyRepository(IStrategyRepository):
                 "max_drawdown": str(strategy.live_performance.max_drawdown),
                 "sharpe_ratio": str(strategy.live_performance.sharpe_ratio) if strategy.live_performance.sharpe_ratio else None,
             },
+            "code_content": strategy.code_content,
         }
 
     async def save(self, strategy: Strategy) -> Strategy:

@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import Plot from 'react-plotly.js';
+import { PeriodStatsRow, PeriodStats } from '@/components/dashboard/PeriodStats';
 
 
 
@@ -105,6 +106,40 @@ export default function BotDetail() {
   // === Active tab tracking ===
   const [activeTab, setActiveTab] = useState('positions');
 
+  // === Period Stats for sub-metrics display ===
+  const [periodStats, setPeriodStats] = useState<PeriodStats | null>(null);
+  const [periodStatsLoading, setPeriodStatsLoading] = useState(true);
+
+  // Load period stats from backend API (reusable callback for real-time updates)
+  const loadPeriodStats = useCallback(async () => {
+    if (!botId) return;
+
+    try {
+      setPeriodStatsLoading(true);
+      const response = await apiClient.get(`/api/v1/bots/${botId}/stats/periods`);
+      setPeriodStats(response.data);
+    } catch (error) {
+      console.error('Failed to load period stats:', error);
+      // Fall back to empty stats
+      setPeriodStats({
+        today: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+        yesterday: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+        this_week: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+        last_week: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+        this_month: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+        last_month: { pnl: 0, trades: 0, wins: 0, losses: 0 },
+      });
+    } finally {
+      setPeriodStatsLoading(false);
+    }
+  }, [botId]);
+
+  // Load period stats on mount
+  useEffect(() => {
+    loadPeriodStats();
+  }, [loadPeriodStats]);
+
+
   // === NEW: Price Explosion Effect State ===
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [explosions, setExplosions] = useState<{ id: number; y: number }[]>([]);
@@ -131,7 +166,13 @@ export default function BotDetail() {
 
   // Calculate Totals
   const totalUnrealizedPnl = positions.reduce((sum, p) => sum + (parseFloat(String(p.unrealized_pnl || 0)) || 0), 0);
-  const totalMargin = positions.reduce((sum, p) => sum + ((parseFloat(String(p.entry_price || 0)) * parseFloat(String(p.quantity || 0))) / (parseFloat(String(p.leverage || 1)) || 1)), 0);
+  const totalMargin = positions.reduce((sum, p) => {
+    // Priority: position_initial_margin > isolated_wallet > calculation
+    const margin = parseFloat(String(p.position_initial_margin || p.isolated_wallet || 0));
+    if (margin > 0) return sum + margin;
+    // Fallback calculation
+    return sum + ((parseFloat(String(p.entry_price || 0)) * parseFloat(String(p.quantity || 0))) / (parseFloat(String(p.leverage || 1)) || 1));
+  }, 0);
   const totalRoi = totalMargin > 0 ? (totalUnrealizedPnl / totalMargin) * 100 : 0;
 
   const handleClosePosition = async (symbol: string, side: string) => {
@@ -362,7 +403,8 @@ export default function BotDetail() {
     loadPositions(false); // Don't show loading spinner for smooth update
     loadOrders();
     loadTrades();
-  }, [loadPositions, loadOrders, loadTrades]);
+    loadPeriodStats(); // === REAL-TIME: Refresh period sub-metrics ===
+  }, [loadPositions, loadOrders, loadTrades, loadPeriodStats]);
 
   const { stats: wsStats, isConnected } = useBotStatsWebSocket({
     botId: botId || '',
@@ -512,6 +554,7 @@ export default function BotDetail() {
 
         {/* Summary Stats - Uses real-time WebSocket data when available */}
         <div className="grid gap-4 md:grid-cols-4">
+          {/* Total P&L Card */}
           <Card className="border-border bg-card relative">
             {/* WebSocket connection indicator */}
             <div className="absolute top-2 right-2" title={isConnected ? "Live updates active" : "Connecting..."}>
@@ -526,14 +569,20 @@ export default function BotDetail() {
               <p className={cn("text-2xl font-bold", displayStats.totalPnl >= 0 ? "text-primary" : "text-destructive")}>
                 {displayStats.totalPnl >= 0 ? '+' : ''}${displayStats.totalPnl.toFixed(2)}
               </p>
+              {periodStats && <PeriodStatsRow periodStats={periodStats} metric="pnl" />}
             </CardContent>
           </Card>
+
+          {/* Win Rate Card */}
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Win Rate</p>
               <p className="text-2xl font-bold text-foreground">{displayStats.winRate.toFixed(1)}%</p>
+              {periodStats && <PeriodStatsRow periodStats={periodStats} metric="winRate" />}
             </CardContent>
           </Card>
+
+          {/* Total Trades Card */}
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Total Trades</p>
@@ -543,8 +592,11 @@ export default function BotDetail() {
                   ({displayStats.winningTrades}W / {displayStats.losingTrades}L)
                 </span>
               </p>
+              {periodStats && <PeriodStatsRow periodStats={periodStats} metric="trades" />}
             </CardContent>
           </Card>
+
+          {/* Streak Card */}
           <Card className="border-border bg-card">
             <CardContent className="pt-4">
               <p className="text-sm text-muted-foreground">Streak</p>
@@ -562,6 +614,7 @@ export default function BotDetail() {
               <p className="text-xs text-muted-foreground">
                 Best: {displayStats.maxWinStreak}W | Worst: {displayStats.maxLossStreak}L
               </p>
+              {periodStats && <PeriodStatsRow periodStats={periodStats} metric="streak" />}
             </CardContent>
           </Card>
         </div>
@@ -872,23 +925,26 @@ export default function BotDetail() {
                       <TableHead className="w-[100px]">Symbol</TableHead>
                       <TableHead className="w-[80px]">Side</TableHead>
                       <TableHead className="text-right w-[100px]">Size</TableHead>
-                      <TableHead className="text-right w-[120px]">Entry Price</TableHead>
-                      <TableHead className="text-right w-[120px]">Mark Price</TableHead>
-                      <TableHead className="text-right w-[160px]">P&L</TableHead>
-                      <TableHead className="text-right w-[100px]">Leverage</TableHead>
-                      <TableHead className="text-right w-[100px]">Action</TableHead>
+                      <TableHead className="text-right w-[110px]">Entry Price</TableHead>
+                      <TableHead className="text-right w-[110px]">Mark Price</TableHead>
+                      <TableHead className="text-right w-[110px]">Break-even</TableHead>
+                      <TableHead className="text-right w-[110px]">Liq. Price</TableHead>
+                      <TableHead className="text-right w-[140px]">P&L</TableHead>
+                      <TableHead className="text-right w-[140px]">Margin</TableHead>
+                      <TableHead className="text-right w-[80px]">Leverage</TableHead>
+                      <TableHead className="text-right w-[80px]">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {positionsLoading ? (
                       <TableRow>
-                        <TableCell colSpan={8} className="text-center py-8">
+                        <TableCell colSpan={11} className="text-center py-8">
                           <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto"></div>
                         </TableCell>
                       </TableRow>
                     ) : positions.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                        <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
                           No open positions
                         </TableCell>
                       </TableRow>
@@ -902,6 +958,13 @@ export default function BotDetail() {
                           const currentPrice = parseFloat(String(pos.mark_price || pos.current_price || 0));
                           const unrealizedPnl = parseFloat(String(pos.unrealized_pnl || 0));
                           const unrealizedPnlPct = parseFloat(String(pos.unrealized_pnl_pct || 0));
+
+                          // NEW: Parse new fields
+                          const breakEvenPrice = parseFloat(String(pos.break_even_price || 0));
+                          const liquidationPrice = parseFloat(String(pos.liquidation_price || 0));
+                          const positionInitialMargin = parseFloat(String(pos.position_initial_margin || pos.isolated_wallet || 0));
+                          const maintMargin = parseFloat(String(pos.maint_margin || 0));
+                          const marginAsset = pos.margin_asset || 'USDT';
 
                           return (
                             <TableRow key={pos.id} className="border-border">
@@ -920,12 +983,31 @@ export default function BotDetail() {
                                   formatter={(v) => v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 />
                               </TableCell>
+                              {/* NEW: Break-even Price */}
+                              <TableCell className="text-right font-mono tabular-nums">
+                                {breakEvenPrice > 0 ? `$${breakEvenPrice.toLocaleString()}` : '-'}
+                              </TableCell>
+                              {/* NEW: Liquidation Price */}
+                              <TableCell className="text-right font-mono tabular-nums text-destructive/80">
+                                {liquidationPrice > 0 ? `$${liquidationPrice.toLocaleString()}` : '-'}
+                              </TableCell>
+                              {/* P&L */}
                               <TableCell className={cn("text-right font-mono tabular-nums", unrealizedPnl >= 0 ? "text-primary" : "text-destructive")}>
                                 <div className="flex items-center justify-end gap-1">
                                   {unrealizedPnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
                                   ${Math.abs(unrealizedPnl).toFixed(2)} ({unrealizedPnlPct.toFixed(2)}%)
                                 </div>
                               </TableCell>
+                              {/* NEW: Margin (positionInitialMargin with maintMargin) */}
+                              <TableCell className="text-right font-mono tabular-nums">
+                                <div className="flex flex-col items-end">
+                                  <span>{positionInitialMargin.toFixed(2)} {marginAsset}</span>
+                                  {maintMargin > 0 && (
+                                    <span className="text-xs text-muted-foreground">(Min: {maintMargin.toFixed(2)})</span>
+                                  )}
+                                </div>
+                              </TableCell>
+                              {/* Leverage */}
                               <TableCell className="text-right font-mono tabular-nums">
                                 <div className="flex flex-col items-end">
                                   <span>{pos.leverage || 1}x</span>
@@ -947,11 +1029,11 @@ export default function BotDetail() {
                           );
                         })}
                         <TableRow className="hover:bg-transparent border-t-[1px] border-border bg-muted/10 font-bold">
-                          <TableCell colSpan={5} className="text-right py-4">Total Unrealized PnL</TableCell>
+                          <TableCell colSpan={7} className="text-right py-4">Total Unrealized PnL</TableCell>
                           <TableCell className={cn("text-right font-mono tabular-nums py-4", totalUnrealizedPnl >= 0 ? "text-green-500" : "text-red-500")}>
                             ${totalUnrealizedPnl.toFixed(2)} ({totalRoi.toFixed(2)}%)
                           </TableCell>
-                          <TableCell className="py-4"></TableCell>
+                          <TableCell colSpan={2} className="py-4"></TableCell>
                           <TableCell className="text-right py-4">
                             <Button
                               variant="outline"

@@ -31,7 +31,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 
 type BacktestStatus = 'running' | 'paused' | 'completed' | 'error' | 'pending';
-type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'status' | 'createdAt';
+type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'status' | 'createdAt' | 'totalTrades' | 'maxDrawdown' | 'initialCapital' | 'leverage' | 'fundingRate' | 'makerFee' | 'takerFee' | 'slippagePercent' | 'exchange';
 type SortDirection = 'asc' | 'desc';
 
 interface BacktestItem {
@@ -42,13 +42,18 @@ interface BacktestItem {
   startDate: string;
   endDate: string;
   initialCapital: number;
+  leverage: number;
+  fundingRate: number;
+  makerFee: number;
+  takerFee: number;
+  slippagePercent: number;
   // Exchange connection info
   exchangeConnectionId: string;
   exchangeName: string;
   netProfit: number | null;
   netProfitPercent: number | null;
   winRate: number | null;
-  maxDrawdown: number | null; // Not available in list view typically
+  maxDrawdown: number | null;
   sharpeRatio: number | null; // Not available in list view typically
   totalTrades: number | null;
   profitFactor: number | null; // Not available in list view typically
@@ -58,6 +63,9 @@ interface BacktestItem {
   createdAt: string;
 }
 
+// ... (keep existing statusConfig and shimmerStyle)
+
+// Status configuration moved to keep file clean
 const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
   running: { label: 'Running', color: 'border-primary/50 text-primary bg-primary/10', icon: Play },
   pending: { label: 'Pending', color: 'border-yellow-500/50 text-yellow-500', icon: Clock },
@@ -86,7 +94,7 @@ export default function Backtest() {
   const [backtests, setBacktests] = useState<BacktestItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [strategies, setStrategies] = useState<{ id: string; name: string; }[]>([]);
-  const [exchangeConnections, setExchangeConnections] = useState<{ id: string; name: string; exchange_type?: string; }[]>([]);
+  const [exchanges, setExchanges] = useState<string[]>([]);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStrategy, setFilterStrategy] = useState<string>('all');
@@ -110,18 +118,17 @@ export default function Backtest() {
 
 
 
-  const fetchExchangeConnections = async () => {
+  const fetchAvailableExchanges = async () => {
     try {
-      const res = await apiClient.get('/api/v1/exchanges/connections');
+      const res = await apiClient.get('/api/v1/backtests/available-exchanges');
       const data = res.data;
 
       if (Array.isArray(data)) {
-        setExchangeConnections(data);
+        setExchanges(data);
       }
     } catch (error) {
-      console.error('Failed to load connections:', error);
-      // Don't throw - just empty list
-      setExchangeConnections([]);
+      console.error('Failed to load exchanges:', error);
+      setExchanges([]);
     }
   };
 
@@ -173,12 +180,17 @@ export default function Backtest() {
         startDate: b.start_date,
         endDate: b.end_date,
         initialCapital: parseFloat(b.initial_capital),
+        leverage: b.config?.leverage || 1,
+        fundingRate: b.config?.funding_rate_daily !== undefined ? Number(b.config.funding_rate_daily) * 100 : 0.03,
+        makerFee: b.config?.maker_fee_rate !== undefined ? Number(b.config.maker_fee_rate) * 100 : 0.02,
+        takerFee: b.config?.taker_fee_rate !== undefined ? Number(b.config.taker_fee_rate) * 100 : 0.04,
+        slippagePercent: b.config?.slippage_percent !== undefined ? Number(b.config.slippage_percent) * 100 : 0.1,
         exchangeConnectionId: b.exchange_connection_id,
-        exchangeName: b.exchange_name || exchangeConnections.find(e => e.id === b.exchange_connection_id)?.name || 'Unknown',
+        exchangeName: b.exchange_name || 'Unknown',
         netProfit: b.final_equity ? b.final_equity - b.initial_capital : null,
         netProfitPercent: b.total_return ? b.total_return * 100 : null,
         winRate: b.win_rate != null ? parseFloat(b.win_rate) : null,
-        maxDrawdown: null,
+        maxDrawdown: b.max_drawdown !== null ? parseFloat(b.max_drawdown) : null,
         sharpeRatio: null,
         totalTrades: b.total_trades,
         profitFactor: null,
@@ -203,7 +215,7 @@ export default function Backtest() {
     console.log('[DEBUG] Initial useEffect START');
     fetchBacktests();
     fetchStrategies();
-    fetchExchangeConnections();
+    fetchAvailableExchanges();
     console.log('[DEBUG] Initial fetches triggered');
     // Poll for updates every 5 seconds if there are running backtests
     const interval = setInterval(() => {
@@ -280,11 +292,38 @@ export default function Backtest() {
           case 'winRate':
             comparison = (a.winRate || 0) - (b.winRate || 0);
             break;
+          case 'initialCapital':
+            comparison = (a.initialCapital || 0) - (b.initialCapital || 0);
+            break;
+          case 'totalTrades':
+            comparison = (a.totalTrades || 0) - (b.totalTrades || 0);
+            break;
+          case 'maxDrawdown':
+            comparison = (a.maxDrawdown || 0) - (b.maxDrawdown || 0);
+            break;
           case 'status':
             comparison = a.status.localeCompare(b.status);
             break;
           case 'createdAt':
             comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+            break;
+          case 'leverage':
+            comparison = (a.leverage || 0) - (b.leverage || 0);
+            break;
+          case 'fundingRate':
+            comparison = (a.fundingRate || 0) - (b.fundingRate || 0);
+            break;
+          case 'makerFee':
+            comparison = (a.makerFee || 0) - (b.makerFee || 0);
+            break;
+          case 'takerFee':
+            comparison = (a.takerFee || 0) - (b.takerFee || 0);
+            break;
+          case 'slippagePercent':
+            comparison = (a.slippagePercent || 0) - (b.slippagePercent || 0);
+            break;
+          case 'exchange':
+            comparison = a.exchangeName.localeCompare(b.exchangeName);
             break;
         }
         return sortDirection === 'desc' ? -comparison : comparison;
@@ -333,9 +372,9 @@ export default function Backtest() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
 
-    // Get strategy ID and exchange connection ID from form
+    // Get strategy ID and exchange name from form
     const strategyId = formData.get('strategy') as string;
-    const exchangeConnectionId = formData.get('exchangeConnection') as string;
+    const exchangeName = formData.get('exchangeName') as string;
 
     // Validate strategy is selected
     if (!strategyId || strategyId === '__no_strategies__') {
@@ -343,19 +382,19 @@ export default function Backtest() {
       return;
     }
 
-    // Validate exchange connection is selected
-    if (!exchangeConnectionId || exchangeConnectionId === '__no_connections__') {
-      toast({ title: 'Please select an Exchange Connection', variant: 'destructive' });
+    // Validate exchange is selected
+    if (!exchangeName || exchangeName === '__no_exchanges__') {
+      toast({ title: 'Please select an Exchange', variant: 'destructive' });
       return;
     }
 
     console.log("DEBUG: Strategy UUID =", strategyId);
-    console.log("DEBUG: Exchange Connection ID =", exchangeConnectionId);
+    console.log("DEBUG: Exchange Name =", exchangeName);
 
 
     const payload = {
       strategy_id: strategyId,
-      exchange_connection_id: exchangeConnectionId,
+      exchange_name: exchangeName,
       config: {
         symbol: formData.get('symbol'),
         timeframe: formData.get('timeframe'),
@@ -363,6 +402,11 @@ export default function Backtest() {
         start_date: `${formData.get('startDate')}T00:00:00`,
         end_date: `${formData.get('endDate')}T00:00:00`,
         initial_capital: Number(formData.get('initialCapital')),
+        leverage: Number(formData.get('leverage')) || 1,
+        taker_fee_rate: formData.get('takerFee') ? Number(formData.get('takerFee')) : 0.04,
+        maker_fee_rate: formData.get('makerFee') ? Number(formData.get('makerFee')) : 0.02,
+        funding_rate_daily: formData.get('fundingRate') ? Number(formData.get('fundingRate')) : 0.03,
+        slippage_percent: formData.get('slippagePercent') ? Number(formData.get('slippagePercent')) : 0.1,
         position_sizing: 'percent_equity',
         position_size_percent: 100,
         mode: 'event_driven'
@@ -485,22 +529,22 @@ export default function Backtest() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Exchange Connection <span className="text-destructive">*</span></Label>
-                  <Select name="exchangeConnection" defaultValue={exchangeConnections[0]?.id || undefined}>
+                  <Label>Exchange <span className="text-destructive">*</span></Label>
+                  <Select name="exchangeName" defaultValue={exchanges[0] || undefined}>
                     <SelectTrigger>
                       <SelectValue placeholder="Select exchange..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {exchangeConnections.length === 0 ? (
-                        <SelectItem value="__no_connections__" disabled>No connections available</SelectItem>
+                      {exchanges.length === 0 ? (
+                        <SelectItem value="__no_exchanges__" disabled>No exchanges available</SelectItem>
                       ) : (
-                        exchangeConnections.map(e => (
-                          <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>
+                        exchanges.map(e => (
+                          <SelectItem key={e} value={e}>{e}</SelectItem>
                         ))
                       )}
                     </SelectContent>
                   </Select>
-                  {exchangeConnections.length === 0 && (
+                  {exchanges.length === 0 && (
                     <p className="text-xs text-muted-foreground">
                       Please add an exchange connection in Exchange settings first.
                     </p>
@@ -519,7 +563,10 @@ export default function Backtest() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
+                        <SelectItem value="1m">1 Minute</SelectItem>
+                        <SelectItem value="5m">5 Minutes</SelectItem>
                         <SelectItem value="15m">15 Minutes</SelectItem>
+                        <SelectItem value="30m">30 Minutes</SelectItem>
                         <SelectItem value="1h">1 Hour</SelectItem>
                         <SelectItem value="4h">4 Hours</SelectItem>
                         <SelectItem value="1d">1 Day</SelectItem>
@@ -539,9 +586,34 @@ export default function Backtest() {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Initial Capital ($)</Label>
-                  <Input type="number" name="initialCapital" defaultValue="10000" required />
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Initial Capital ($)</Label>
+                    <Input type="number" name="initialCapital" defaultValue="10000" required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Leverage (x)</Label>
+                    <Input type="number" name="leverage" defaultValue="1" min="1" max="125" required />
+                  </div>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Taker Fee (%)</Label>
+                    <Input type="number" name="takerFee" defaultValue="0.04" step="0.01" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Maker Fee (%)</Label>
+                    <Input type="number" name="makerFee" defaultValue="0.02" step="0.01" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Funding/Day (%)</Label>
+                    <Input type="number" name="fundingRate" defaultValue="0.03" step="0.01" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Slippage (%)</Label>
+                    <Input type="number" name="slippagePercent" defaultValue="0.1" min="0.1" max="5.0" step="0.1" />
+                  </div>
                 </div>
 
                 <div className="flex gap-3 pt-4">
@@ -696,14 +768,69 @@ export default function Backtest() {
                         Symbol <SortIcon field="symbol" />
                       </button>
                     </TableHead>
-                    <TableHead>Exchange</TableHead>
-                    <TableHead>Period</TableHead>
                     <TableHead>
                       <button
-                        onClick={() => handleSort('status')}
+                        onClick={() => handleSort('exchange')}
                         className="flex items-center hover:text-foreground transition-colors"
                       >
-                        Status <SortIcon field="status" />
+                        Exchange <SortIcon field="exchange" />
+                      </button>
+                    </TableHead>
+                    <TableHead>Period</TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('initialCapital')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Initial Capital ($) <SortIcon field="initialCapital" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('leverage')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Leverage <SortIcon field="leverage" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('fundingRate')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Funding <SortIcon field="fundingRate" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('makerFee')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Maker <SortIcon field="makerFee" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('takerFee')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Taker <SortIcon field="takerFee" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('slippagePercent')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Slippage <SortIcon field="slippagePercent" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
+                        onClick={() => handleSort('totalTrades')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Trades <SortIcon field="totalTrades" />
                       </button>
                     </TableHead>
                     <TableHead className="text-right">
@@ -716,10 +843,34 @@ export default function Backtest() {
                     </TableHead>
                     <TableHead className="text-right">
                       <button
+                        onClick={() => handleSort('maxDrawdown')}
+                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                      >
+                        Max DD <SortIcon field="maxDrawdown" />
+                      </button>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <button
                         onClick={() => handleSort('winRate')}
                         className="flex items-center justify-end w-full hover:text-foreground transition-colors"
                       >
                         Win Rate <SortIcon field="winRate" />
+                      </button>
+                    </TableHead>
+                    <TableHead>
+                      <button
+                        onClick={() => handleSort('status')}
+                        className="flex items-center hover:text-foreground transition-colors"
+                      >
+                        Status <SortIcon field="status" />
+                      </button>
+                    </TableHead>
+                    <TableHead>
+                      <button
+                        onClick={() => handleSort('createdAt')}
+                        className="flex items-center hover:text-foreground transition-colors"
+                      >
+                        Created At <SortIcon field="createdAt" />
                       </button>
                     </TableHead>
                     <TableHead className="text-center">Actions</TableHead>
@@ -764,7 +915,56 @@ export default function Backtest() {
                             <span>{backtest.startDate} - {backtest.endDate}</span>
                           </div>
                         </TableCell>
-
+                        <TableCell className="text-right font-mono">
+                          ${backtest.initialCapital.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.leverage}x
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.fundingRate}%
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.makerFee}%
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.takerFee}%
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.slippagePercent}%
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.totalTrades ?? '-'}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            {backtest.netProfit !== null ? (
+                              <>
+                                {isProfit ? (
+                                  <TrendingUp className="h-3 w-3 text-primary" />
+                                ) : (
+                                  <TrendingDown className="h-3 w-3 text-destructive" />
+                                )}
+                                <span className={cn("font-mono font-medium", isProfit ? "text-primary" : "text-destructive")}>
+                                  {isProfit ? '+' : ''}${backtest.netProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                </span>
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </div>
+                          {backtest.netProfitPercent != null && (
+                            <p className={cn("text-xs", isProfit ? "text-primary/70" : "text-destructive/70")}>
+                              {isProfit ? '+' : ''}{Number(backtest.netProfitPercent).toFixed(2)}%
+                            </p>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-destructive">
+                          {backtest.maxDrawdown !== null ? `${backtest.maxDrawdown.toFixed(2)}%` : '-'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {backtest.winRate != null ? `${Number(backtest.winRate).toFixed(1)}%` : '-'}
+                        </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <Badge variant="outline" className={config.color}>
@@ -791,31 +991,8 @@ export default function Backtest() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            {backtest.netProfit !== null ? (
-                              <>
-                                {isProfit ? (
-                                  <TrendingUp className="h-3 w-3 text-primary" />
-                                ) : (
-                                  <TrendingDown className="h-3 w-3 text-destructive" />
-                                )}
-                                <span className={cn("font-mono font-medium", isProfit ? "text-primary" : "text-destructive")}>
-                                  {isProfit ? '+' : ''}${backtest.netProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                                </span>
-                              </>
-                            ) : (
-                              <span className="text-muted-foreground">-</span>
-                            )}
-                          </div>
-                          {backtest.netProfitPercent != null && (
-                            <p className={cn("text-xs", isProfit ? "text-primary/70" : "text-destructive/70")}>
-                              {isProfit ? '+' : ''}{Number(backtest.netProfitPercent).toFixed(2)}%
-                            </p>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.winRate != null ? `${Number(backtest.winRate).toFixed(1)}%` : '-'}
+                        <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+                          {new Date(backtest.createdAt).toLocaleString()}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center justify-center gap-1">

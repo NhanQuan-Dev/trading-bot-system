@@ -2,7 +2,7 @@
 
 import logging
 from decimal import Decimal
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Union, Any
 from datetime import datetime
 
 from ...domain.backtesting import (
@@ -48,6 +48,10 @@ class BacktestEngine:
         self.current_position: Optional[BacktestPosition] = None
         self.trades: List[BacktestTrade] = []
         self.equity_curve: List[EquityCurvePoint] = []
+        
+        # Stats
+        self.equity_curve: List[EquityCurvePoint] = []
+        self.last_funding_time: Optional[datetime] = None
         
         # Stats
         self.total_bars_processed = 0
@@ -163,15 +167,40 @@ class BacktestEngine:
         # Update current position metrics
         current_price = Decimal(str(candle["close"]))
         
+        # Check Funding Fee
+        self._check_funding(candle)
+        
         if self.current_position:
             self.current_position.update_unrealized_pnl(current_price)
             
-            # Check stop loss / take profit
-            if self._should_close_position(current_price):
+            # Level 2 SL/TP Check: Use High/Low prices for more accurate simulation
+            candle_high = Decimal(str(candle.get("high", candle["close"])))
+            candle_low = Decimal(str(candle.get("low", candle["close"])))
+            
+            # Update trailing stop (must happen BEFORE checking if triggered)
+            self.current_position.update_trailing_stop(candle_high, candle_low)
+            
+            # Check SL/TP/Trailing with High/Low
+            # Priority 0: Liquidation Check (Before SL/TP)
+            liquidation_result = self._check_liquidation(candle_high, candle_low)
+            if liquidation_result:
+                close_price, reason = liquidation_result
+                logger.warning(f"LIQUIDATION Triggered at {close_price} ({reason})")
                 self._close_position(
-                    price=current_price,
+                    price=close_price,
                     timestamp=candle["timestamp"],
-                    reason="Stop loss / Take profit",
+                    reason=reason,
+                )
+                return
+
+            sl_tp_result = self._check_sl_tp_trailing_with_high_low(candle_high, candle_low)
+            
+            if sl_tp_result:
+                close_price, reason = sl_tp_result
+                self._close_position(
+                    price=close_price,
+                    timestamp=candle["timestamp"],
+                    reason=reason,
                 )
                 return
         
@@ -187,31 +216,74 @@ class BacktestEngine:
         self._update_equity_curve(candle["timestamp"], current_price)
     
     def _process_signal(self, signal: Dict, candle: Dict) -> None:
-        """Process trading signal from strategy."""
+        """Process trading signal from strategy.
         
-        signal_type = signal.get("type")  # "buy", "sell", "close"
+        Supported signal types:
+        - open_long: Open new LONG position (from flat)
+        - open_short: Open new SHORT position (from flat)
+        - add_long: Add to existing LONG (scale in)
+        - add_short: Add to existing SHORT (scale in)
+        - close_position: Close entire position
+        - partial_close: Close specified quantity
+        - reduce_long: Reduce LONG by quantity
+        - reduce_short: Reduce SHORT by quantity
+        - flip_long: Close SHORT and open LONG
+        - flip_short: Close LONG and open SHORT
+        """
+        signal_type = signal.get("type")
+        signal_quantity = signal.get("quantity")  # Optional quantity override
         current_price = Decimal(str(candle["close"]))
+        timestamp = candle["timestamp"]
         
-        if signal_type == "buy" and not self.current_position:
-            self._open_long_position(
-                price=current_price,
-                timestamp=candle["timestamp"],
-                signal=signal,
-            )
+        # === OPEN NEW POSITIONS (from flat) ===
+        if signal_type in ("open_long", "buy") and not self.current_position:
+            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal)
         
-        elif signal_type == "sell" and not self.current_position:
-            self._open_short_position(
-                price=current_price,
-                timestamp=candle["timestamp"],
-                signal=signal,
-            )
+        elif signal_type in ("open_short", "sell") and not self.current_position:
+            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal)
         
-        elif signal_type == "close" and self.current_position:
-            self._close_position(
-                price=current_price,
-                timestamp=candle["timestamp"],
-                reason="Signal close",
-            )
+        # === ADD TO EXISTING POSITIONS (scale in) ===
+        elif signal_type == "add_long" and self._is_long():
+            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity)
+        
+        elif signal_type == "add_short" and self._is_short():
+            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity)
+        
+        # === CLOSE ENTIRE POSITION ===
+        elif signal_type in ("close_position", "close") and self.current_position:
+            reason = signal.get("metadata") or "Signal close"
+            self._close_position(price=current_price, timestamp=timestamp, reason=reason)
+        
+        # === PARTIAL CLOSE / REDUCE ===
+        elif signal_type == "partial_close" and self.current_position:
+            reason = signal.get("metadata") or "Partial Close"
+            self._partial_close(price=current_price, timestamp=timestamp, quantity=signal_quantity, reason=reason)
+        
+        elif signal_type == "reduce_long" and self._is_long():
+            reason = signal.get("metadata") or "Reduce Long"
+            self._partial_close(price=current_price, timestamp=timestamp, quantity=signal_quantity, reason=reason)
+        
+        elif signal_type == "reduce_short" and self._is_short():
+            reason = signal.get("metadata") or "Reduce Short"
+            self._partial_close(price=current_price, timestamp=timestamp, quantity=signal_quantity, reason=reason)
+        
+        # === FLIP POSITIONS ===
+        elif signal_type == "flip_long" and self._is_short():
+            reason = signal.get("metadata") or "Flip to LONG"
+            self._close_position(price=current_price, timestamp=timestamp, reason=reason)
+            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal)
+        
+        elif signal_type == "flip_short" and self._is_long():
+            self._close_position(price=current_price, timestamp=timestamp, reason="Flip to SHORT")
+            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal)
+    
+    def _is_long(self) -> bool:
+        """Check if current position is LONG."""
+        return self.current_position is not None and self.current_position.direction == TradeDirection.LONG
+    
+    def _is_short(self) -> bool:
+        """Check if current position is SHORT."""
+        return self.current_position is not None and self.current_position.direction == TradeDirection.SHORT
     
     def _open_long_position(
         self,
@@ -224,13 +296,18 @@ class BacktestEngine:
         # Calculate position size
         quantity = self._calculate_position_size(price)
         
-        # Simulate order execution
-        fill = self.market_simulator.simulate_buy_order(
+        # Simulate LONG entry
+        print(f"DEBUG: Processing Signal in _open_long_position: {signal}")
+        fill = self.market_simulator.simulate_long_entry(
             symbol=self.config.symbol,
             quantity=quantity,
             current_price=price,
             timestamp=timestamp,
         )
+        
+        # Override commission with Taker Fee
+        trade_value = fill.filled_quantity * fill.filled_price
+        fill.commission = trade_value * self.config.taker_fee_rate
         
         if fill.filled_quantity == 0:
             return  # Order not filled
@@ -247,6 +324,7 @@ class BacktestEngine:
         self.current_position.take_profit = signal.get("take_profit")
         self.current_position.entry_time = timestamp
         self.current_position.entry_commission = fill.commission
+        self.current_position.metadata = signal.get("metadata", signal.get("reason"))
         
         # Note: Don't modify equity when opening position
         # Equity will be updated when position is closed with realized PnL
@@ -264,13 +342,17 @@ class BacktestEngine:
         # Calculate position size
         quantity = self._calculate_position_size(price)
         
-        # Simulate order execution
-        fill = self.market_simulator.simulate_sell_order(
+        # Simulate SHORT entry
+        fill = self.market_simulator.simulate_short_entry(
             symbol=self.config.symbol,
             quantity=quantity,
             current_price=price,
             timestamp=timestamp,
         )
+        
+        # Override commission with Taker Fee
+        trade_value = fill.filled_quantity * fill.filled_price
+        fill.commission = trade_value * self.config.taker_fee_rate
         
         if fill.filled_quantity == 0:
             return
@@ -287,6 +369,7 @@ class BacktestEngine:
         self.current_position.take_profit = signal.get("take_profit")
         self.current_position.entry_time = timestamp
         self.current_position.entry_commission = fill.commission
+        self.current_position.metadata = signal.get("metadata", signal.get("reason"))
         
         # Note: Don't modify equity when opening position
         # Equity will be updated when position is closed with realized PnL
@@ -297,28 +380,45 @@ class BacktestEngine:
         self,
         price: Decimal,
         timestamp: str,
-        reason: str,
+        reason: Union[str, Dict[str, Any]],
     ) -> None:
         """Close current position and record trade."""
         
         if not self.current_position:
             return
         
-        # Simulate order execution
+        # Simulate position exit
         if self.current_position.direction == TradeDirection.LONG:
-            fill = self.market_simulator.simulate_sell_order(
+            # Closing LONG = SHORT entry action
+            fill = self.market_simulator.simulate_short_entry(
                 symbol=self.config.symbol,
                 quantity=self.current_position.quantity,
                 current_price=price,
                 timestamp=timestamp,
             )
         else:
-            fill = self.market_simulator.simulate_buy_order(
+            # Closing SHORT = LONG entry action
+            fill = self.market_simulator.simulate_long_entry(
                 symbol=self.config.symbol,
                 quantity=self.current_position.quantity,
                 current_price=price,
                 timestamp=timestamp,
             )
+            
+        # Override commission based on Maker/Taker
+        is_maker = False
+        if isinstance(reason, dict):
+            r_str = str(reason.get("reason", "")).lower()
+        else:
+            r_str = str(reason).lower()
+            
+        if "take profit" in r_str or "tp" in r_str:
+            is_maker = True
+            
+        rate = self.config.maker_fee_rate if is_maker else self.config.taker_fee_rate
+        
+        trade_value = fill.filled_quantity * fill.filled_price
+        fill.commission = trade_value * rate
         
         if fill.filled_quantity == 0:
             return
@@ -342,23 +442,29 @@ class BacktestEngine:
         entry_value = self.current_position.avg_entry_price * fill.filled_quantity
         pnl_percent = (net_pnl / entry_value) * Decimal("100") if entry_value > 0 else Decimal("0")
         
+        # Normalize exit reason to dict
+        exit_reason_dict = reason if isinstance(reason, dict) else {"reason": reason}
+
         # Create trade record
         trade = BacktestTrade(
             symbol=self.config.symbol,
             direction=self.current_position.direction,
             entry_price=self.current_position.avg_entry_price,
             exit_price=fill.filled_price,
-            entry_quantity=fill.filled_quantity,  # Changed from 'quantity'
+            entry_quantity=fill.filled_quantity,
             entry_time=self.current_position.entry_time if hasattr(self.current_position, 'entry_time') else datetime.utcnow(),
             exit_time=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
             gross_pnl=pnl,
             net_pnl=net_pnl,
             pnl_percent=pnl_percent,
-            entry_commission=Decimal("0"),  # Not tracked separately
+            entry_commission=Decimal("0"),
             exit_commission=fill.commission,
-            entry_slippage=Decimal("0"),  # Not tracked separately  
+            entry_slippage=Decimal("0"), 
             exit_slippage=fill.slippage,
+            entry_reason=getattr(self.current_position, 'metadata', None),
+            exit_reason=exit_reason_dict,
         )
+        print(f"DEBUG: Created BacktestTrade with exit_reason: {trade.exit_reason}")
         # Trade is complete - no need to call close()
         
         self.trades.append(trade)
@@ -370,9 +476,319 @@ class BacktestEngine:
         
         logger.debug(f"Closed position: P&L={pnl}, equity={self.equity}")
     
-    def _should_close_position(self, current_price: Decimal) -> bool:
-        """Check if position should be closed due to stop/target."""
+    def _add_to_position(
+        self,
+        price: Decimal,
+        timestamp: str,
+        quantity: Optional[Decimal] = None,
+    ) -> None:
+        """Add to existing position (scale in / average in).
         
+        Args:
+            price: Current market price
+            timestamp: Candle timestamp
+            quantity: Amount to add (optional, uses default sizing if None)
+        """
+        if not self.current_position:
+            return
+        
+        # Calculate quantity to add
+        if quantity is not None:
+            add_qty = Decimal(str(quantity))
+        else:
+            add_qty = self._calculate_position_size(price)
+        
+        # Simulate entry based on position direction
+        if self.current_position.direction == TradeDirection.LONG:
+            fill = self.market_simulator.simulate_long_entry(
+                symbol=self.config.symbol,
+                quantity=add_qty,
+                current_price=price,
+                timestamp=timestamp,
+            )
+        else:
+            fill = self.market_simulator.simulate_short_entry(
+                symbol=self.config.symbol,
+                quantity=add_qty,
+                current_price=price,
+                timestamp=timestamp,
+            )
+        
+        if fill.filled_quantity == 0:
+            return
+        
+        # Calculate new average entry price (weighted average)
+        old_value = self.current_position.avg_entry_price * self.current_position.quantity
+        new_value = fill.filled_price * fill.filled_quantity
+        total_qty = self.current_position.quantity + fill.filled_quantity
+        new_avg_price = (old_value + new_value) / total_qty
+        
+        # Update position
+        self.current_position.quantity = total_qty
+        self.current_position.avg_entry_price = new_avg_price
+        self.current_position.entry_commission += fill.commission
+        
+        logger.debug(
+            f"Added to {self.current_position.direction.value}: "
+            f"+{fill.filled_quantity} @ {fill.filled_price}, "
+            f"total qty: {total_qty}, avg price: {new_avg_price}"
+        )
+    
+    def _partial_close(
+        self,
+        price: Decimal,
+        timestamp: str,
+        quantity: Optional[Decimal] = None,
+        reason: Union[str, Dict[str, Any]] = "Partial Close",
+    ) -> None:
+        """Close part of the current position.
+        
+        Args:
+            price: Current market price
+            timestamp: Candle timestamp
+            quantity: Amount to close
+            reason: Exit reason
+        """
+        if not self.current_position:
+            return
+        
+        # Determine close quantity
+        if quantity is not None:
+            close_qty = min(Decimal(str(quantity)), self.current_position.quantity)
+        else:
+            # Default: close half the position
+            close_qty = self.current_position.quantity / Decimal("2")
+        
+        if close_qty <= 0:
+            return
+        
+        # Simulate exit for partial quantity
+        if self.current_position.direction == TradeDirection.LONG:
+            fill = self.market_simulator.simulate_short_entry(
+                symbol=self.config.symbol,
+                quantity=close_qty,
+                current_price=price,
+                timestamp=timestamp,
+            )
+        else:
+            fill = self.market_simulator.simulate_long_entry(
+                symbol=self.config.symbol,
+                quantity=close_qty,
+                current_price=price,
+                timestamp=timestamp,
+            )
+        
+        if fill.filled_quantity == 0:
+            return
+        
+        # Calculate P&L for closed portion
+        if self.current_position.direction == TradeDirection.LONG:
+            pnl = (fill.filled_price - self.current_position.avg_entry_price) * fill.filled_quantity
+        else:
+            pnl = (self.current_position.avg_entry_price - fill.filled_price) * fill.filled_quantity
+        
+        # Calculate proportional entry commission
+        proportion = fill.filled_quantity / (self.current_position.quantity + fill.filled_quantity)
+        entry_commission = getattr(self.current_position, 'entry_commission', Decimal("0")) * proportion
+        total_costs = entry_commission + fill.commission + fill.slippage
+        net_pnl = pnl - total_costs
+        
+        # Update equity
+        self.equity += net_pnl
+        
+        entry_value = self.current_position.avg_entry_price * fill.filled_quantity
+        pnl_percent = (net_pnl / entry_value) * Decimal("100") if entry_value > 0 else Decimal("0")
+        
+        # Normalize exit reason
+        exit_reason_dict = reason if isinstance(reason, dict) else {"reason": reason}
+
+        # Record partial trade
+        partial_trade = BacktestTrade(
+            symbol=self.config.symbol,
+            direction=self.current_position.direction,
+            entry_price=self.current_position.avg_entry_price,
+            exit_price=fill.filled_price,
+            entry_quantity=fill.filled_quantity,
+            entry_time=self.current_position.entry_time if hasattr(self.current_position, 'entry_time') else datetime.utcnow(),
+            exit_time=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            gross_pnl=pnl,
+            net_pnl=net_pnl,
+            pnl_percent=pnl_percent,
+            entry_commission=entry_commission,
+            exit_commission=fill.commission,
+            entry_slippage=Decimal("0"),
+            exit_slippage=fill.slippage,
+            entry_reason=getattr(self.current_position, 'metadata', None),
+            exit_reason=exit_reason_dict,
+        )
+        self.trades.append(partial_trade)
+        
+        # Update remaining position
+        self.current_position.quantity -= fill.filled_quantity
+        self.current_position.entry_commission -= entry_commission
+        
+        # Update peak equity
+        if self.equity > self.peak_equity:
+            self.peak_equity = self.equity
+        
+        # If fully closed, clear position
+        if self.current_position.quantity <= 0:
+            self.current_position = None
+        else:
+            logger.debug(
+                f"Partial close: {fill.filled_quantity} @ {fill.filled_price}, "
+                f"remaining: {self.current_position.quantity}, P&L={pnl}"
+            )
+    
+    
+    def _check_funding(self, candle: Dict) -> None:
+        """Apply funding fee if applicable."""
+        if not self.config.collect_funding_fee or not self.current_position:
+            return
+            
+        ts = candle["timestamp"]
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+            
+        # Funding times: 00:00, 08:00, 16:00 UTC
+        # We check if this candle is ON or immediately AFTER the hour mark
+        # Simple approach: Check if hour matches and we haven't processed this hour
+        if ts.hour % 8 == 0 and ts.minute == 0:
+            if self.last_funding_time == ts:
+                return
+            self.last_funding_time = ts
+            
+            # Calculate Funding Fee
+            # Rate is Daily. Fee per interval = Daily / 3.
+            position_value = self.current_position.quantity * self.current_position.current_price
+            funding_fee = position_value * (self.config.funding_rate_daily / Decimal("3"))
+            
+            # Deduction logic:
+            # If Rate > 0: Long Pays Short. (Long loses equity).
+            # If Rate < 0: Short Pays Long. (Long gains equity).
+            
+            # Simplified: Assuming standard Positive funding market
+            if self.current_position.direction == TradeDirection.LONG:
+                if self.config.funding_rate_daily > 0:
+                    self.equity -= funding_fee
+                    logger.debug(f"Funding Fee Paid: -{funding_fee:.2f}")
+                else:
+                    self.equity += abs(funding_fee)
+            else: # SHORT
+                if self.config.funding_rate_daily > 0:
+                    self.equity += funding_fee
+                    logger.debug(f"Funding Fee Received: +{funding_fee:.2f}")
+                else:
+                    self.equity -= abs(funding_fee)
+
+    def _check_liquidation(self, candle_high: Decimal, candle_low: Decimal) -> Optional[tuple]:
+        """Check if position is liquidated based on leverage."""
+        if not self.current_position:
+            return None
+            
+        if self.config.leverage <= 1:
+            return None
+            
+        pos = self.current_position
+        # Maintenance Margin Rate (0.5%)
+        maintenance_rate = Decimal("0.005")
+        leverage = Decimal(self.config.leverage)
+        
+        # Calculate Liquidation Price automatically
+        # Long Liq = Entry * (1 - 1/Lev + Maint)
+        # Short Liq = Entry * (1 + 1/Lev - Maint)
+        
+        if pos.direction == TradeDirection.LONG:
+            liq_price = pos.avg_entry_price * (Decimal("1") - (Decimal("1")/leverage) + maintenance_rate)
+            if candle_low <= liq_price:
+                # Ensure we don't return negative price
+                return (max(Decimal("0"), liq_price), "LIQUIDATION")
+                
+        else: # SHORT
+            liq_price = pos.avg_entry_price * (Decimal("1") + (Decimal("1")/leverage) - maintenance_rate)
+            if candle_high >= liq_price:
+                return (liq_price, "LIQUIDATION")
+                
+        return None
+
+    def _check_sl_tp_trailing_with_high_low(
+        self, 
+        candle_high: Decimal, 
+        candle_low: Decimal
+    ) -> Optional[tuple]:
+        """
+        Level 2 SL/TP/Trailing Check: Use High/Low prices for accurate simulation.
+        
+        Checks:
+        1. Fixed Stop Loss
+        2. Fixed Take Profit
+        3. Trailing Stop (dynamic)
+        
+        Args:
+            candle_high: High price of the candle
+            candle_low: Low price of the candle
+            
+        Returns:
+            Tuple (close_price, reason) if triggered, None otherwise
+        """
+        if not self.current_position:
+            return None
+        
+        stop_loss = self.current_position.stop_loss
+        take_profit = self.current_position.take_profit
+        trailing_stop = self.current_position.trailing_stop_price
+        
+        if self.current_position.direction == TradeDirection.LONG:
+            # LONG: SL/Trailing triggers on Low, TP triggers on High
+            
+            # 1. Check Fixed Stop Loss first (highest priority for worst case)
+            if stop_loss and candle_low <= stop_loss:
+                logger.debug(f"LONG SL triggered: low={candle_low} <= sl={stop_loss}")
+                return (stop_loss, "Stop Loss")
+            
+            # 2. Check Trailing Stop
+            if trailing_stop and candle_low <= trailing_stop:
+                logger.debug(f"LONG Trailing Stop triggered: low={candle_low} <= trailing={trailing_stop}")
+                return (trailing_stop, "Trailing Stop")
+            
+            # 3. Check Take Profit
+            if take_profit and candle_high >= take_profit:
+                logger.debug(f"LONG TP triggered: high={candle_high} >= tp={take_profit}")
+                return (take_profit, "Take Profit")
+        
+        else:  # SHORT position
+            # SHORT: SL/Trailing triggers on High, TP triggers on Low
+            
+            # 1. Check Fixed Stop Loss first
+            if stop_loss and candle_high >= stop_loss:
+                logger.debug(f"SHORT SL triggered: high={candle_high} >= sl={stop_loss}")
+                return (stop_loss, "Stop Loss")
+            
+            # 2. Check Trailing Stop
+            if trailing_stop and candle_high >= trailing_stop:
+                logger.debug(f"SHORT Trailing Stop triggered: high={candle_high} >= trailing={trailing_stop}")
+                return (trailing_stop, "Trailing Stop")
+            
+            # 3. Check Take Profit
+            if take_profit and candle_low <= take_profit:
+                logger.debug(f"SHORT TP triggered: low={candle_low} <= tp={take_profit}")
+                return (take_profit, "Take Profit")
+        
+        return None
+    
+    def _check_sl_tp_with_high_low(
+        self, 
+        candle_high: Decimal, 
+        candle_low: Decimal
+    ) -> Optional[tuple]:
+        """Legacy alias - redirects to new unified method."""
+        return self._check_sl_tp_trailing_with_high_low(candle_high, candle_low)
+    
+    def _should_close_position(self, current_price: Decimal) -> bool:
+        """Legacy method - check if position should be closed (Close price only).
+        
+        Note: Prefer using _check_sl_tp_with_high_low for more accurate simulation.
+        """
         if not self.current_position:
             return False
         
@@ -401,12 +817,14 @@ class BacktestEngine:
         
         # Use config position sizing
         if self.config.position_size_value:
-            capital_to_use = self.equity * self.config.position_size_value  # Already in decimal form (0.1 = 10%)
-            quantity = capital_to_use / price
+            capital_to_use = self.equity * self.config.position_size_value
+            # Apply Leverage to purchasing power
+            effective_capital = capital_to_use * Decimal(self.config.leverage)
+            quantity = effective_capital / price
             return quantity
         
-        # Default: use full capital
-        return self.equity / price
+        # Default: use full capital * leverage
+        return (self.equity * Decimal(self.config.leverage)) / price
     
     def _update_equity_curve(self, timestamp: str, current_price: Decimal) -> None:
         """Update equity curve with current state."""

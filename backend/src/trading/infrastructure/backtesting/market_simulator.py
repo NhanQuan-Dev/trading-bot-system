@@ -41,38 +41,69 @@ class MarketSimulator:
         self.use_bid_ask_spread = use_bid_ask_spread
         self.spread_percent = spread_percent
     
-    def simulate_buy_order(
+    def simulate_long_entry(
         self,
         symbol: str,
         quantity: Decimal,
         current_price: Decimal,
         timestamp: str,
         limit_price: Optional[Decimal] = None,
+        candle_low: Optional[Decimal] = None,
+        candle_high: Optional[Decimal] = None,
     ) -> OrderFill:
-        """Simulate market buy order execution."""
+        """Simulate LONG position entry (buying).
         
-        # Apply bid-ask spread
+        Args:
+            symbol: Trading symbol
+            quantity: Order quantity
+            current_price: Current/Close price
+            timestamp: Order timestamp
+            limit_price: Optional limit price for limit orders
+            candle_low: Low price of candle (for limit order fill detection)
+            candle_high: High price of candle (for limit order fill detection)
+        """
+        # Ensure Decimals
+        current_price = Decimal(str(current_price))
+        if limit_price is not None: limit_price = Decimal(str(limit_price))
+        if candle_low is not None: candle_low = Decimal(str(candle_low))
+        if candle_high is not None: candle_high = Decimal(str(candle_high))
+        quantity = Decimal(str(quantity))
+        
+        # For LIMIT orders: Check if price reached the limit during candle
+        if limit_price:
+            # LONG Limit: Fill if price went DOWN to limit (Low <= limit_price)
+            if candle_low is not None and candle_low <= limit_price:
+                # Limit order filled at limit price
+                filled_price = limit_price
+                slippage = Decimal("0")  # Limit orders have no slippage
+                commission = self._calculate_commission(filled_price, quantity)
+                logger.debug(f"LONG Limit filled: low={candle_low} <= limit={limit_price}")
+                return OrderFill(
+                    filled_price=filled_price,
+                    filled_quantity=quantity,
+                    commission=commission,
+                    slippage=slippage,
+                    fill_time=timestamp,
+                )
+            else:
+                # Limit not reached
+                logger.debug(f"LONG Limit not filled: low={candle_low} > limit={limit_price}")
+                return OrderFill(
+                    filled_price=Decimal("0"),
+                    filled_quantity=Decimal("0"),
+                    commission=Decimal("0"),
+                    slippage=Decimal("0"),
+                    fill_time=timestamp,
+                )
+        
+        # For MARKET orders: Use current price with spread and slippage
         if self.use_bid_ask_spread:
             ask_price = current_price * (Decimal("1") + self.spread_percent / Decimal("100"))
         else:
             ask_price = current_price
         
-        # Apply slippage
-        slippage = self._calculate_slippage(ask_price, is_buy=True)
+        slippage = self._calculate_slippage(ask_price, is_long=True)
         filled_price = ask_price + slippage
-        
-        # Check limit price
-        if limit_price and filled_price > limit_price:
-            logger.warning(f"Buy order not filled: price {filled_price} > limit {limit_price}")
-            return OrderFill(
-                filled_price=Decimal("0"),
-                filled_quantity=Decimal("0"),
-                commission=Decimal("0"),
-                slippage=Decimal("0"),
-                fill_time=timestamp,
-            )
-        
-        # Calculate commission
         commission = self._calculate_commission(filled_price, quantity)
         
         return OrderFill(
@@ -83,38 +114,69 @@ class MarketSimulator:
             fill_time=timestamp,
         )
     
-    def simulate_sell_order(
+    def simulate_short_entry(
         self,
         symbol: str,
         quantity: Decimal,
         current_price: Decimal,
         timestamp: str,
         limit_price: Optional[Decimal] = None,
+        candle_low: Optional[Decimal] = None,
+        candle_high: Optional[Decimal] = None,
     ) -> OrderFill:
-        """Simulate market sell order execution."""
+        """Simulate SHORT position entry (selling).
         
-        # Apply bid-ask spread
+        Args:
+            symbol: Trading symbol
+            quantity: Order quantity
+            current_price: Current/Close price
+            timestamp: Order timestamp
+            limit_price: Optional limit price for limit orders
+            candle_low: Low price of candle (for limit order fill detection)
+            candle_high: High price of candle (for limit order fill detection)
+        """
+        # Ensure Decimals
+        current_price = Decimal(str(current_price))
+        if limit_price is not None: limit_price = Decimal(str(limit_price))
+        if candle_low is not None: candle_low = Decimal(str(candle_low))
+        if candle_high is not None: candle_high = Decimal(str(candle_high))
+        quantity = Decimal(str(quantity))
+        
+        # For LIMIT orders: Check if price reached the limit during candle
+        if limit_price:
+            # SHORT Limit: Fill if price went UP to limit (High >= limit_price)
+            if candle_high is not None and candle_high >= limit_price:
+                # Limit order filled at limit price
+                filled_price = limit_price
+                slippage = Decimal("0")  # Limit orders have no slippage
+                commission = self._calculate_commission(filled_price, quantity)
+                logger.debug(f"SHORT Limit filled: high={candle_high} >= limit={limit_price}")
+                return OrderFill(
+                    filled_price=filled_price,
+                    filled_quantity=quantity,
+                    commission=commission,
+                    slippage=slippage,
+                    fill_time=timestamp,
+                )
+            else:
+                # Limit not reached
+                logger.debug(f"SHORT Limit not filled: high={candle_high} < limit={limit_price}")
+                return OrderFill(
+                    filled_price=Decimal("0"),
+                    filled_quantity=Decimal("0"),
+                    commission=Decimal("0"),
+                    slippage=Decimal("0"),
+                    fill_time=timestamp,
+                )
+        
+        # For MARKET orders: Use current price with spread and slippage
         if self.use_bid_ask_spread:
             bid_price = current_price * (Decimal("1") - self.spread_percent / Decimal("100"))
         else:
             bid_price = current_price
         
-        # Apply slippage
-        slippage = self._calculate_slippage(bid_price, is_buy=False)
+        slippage = self._calculate_slippage(bid_price, is_long=False)
         filled_price = bid_price - slippage
-        
-        # Check limit price
-        if limit_price and filled_price < limit_price:
-            logger.warning(f"Sell order not filled: price {filled_price} < limit {limit_price}")
-            return OrderFill(
-                filled_price=Decimal("0"),
-                filled_quantity=Decimal("0"),
-                commission=Decimal("0"),
-                slippage=Decimal("0"),
-                fill_time=timestamp,
-            )
-        
-        # Calculate commission
         commission = self._calculate_commission(filled_price, quantity)
         
         return OrderFill(
@@ -125,8 +187,13 @@ class MarketSimulator:
             fill_time=timestamp,
         )
     
-    def _calculate_slippage(self, price: Decimal, is_buy: bool) -> Decimal:
-        """Calculate slippage based on configured model."""
+    def _calculate_slippage(self, price: Decimal, is_long: bool) -> Decimal:
+        """Calculate slippage based on configured model.
+        
+        Args:
+            price: Current price
+            is_long: True for LONG entry, False for SHORT entry
+        """
         
         if self.slippage_model == SlippageModel.NONE:
             return Decimal("0")
@@ -134,21 +201,23 @@ class MarketSimulator:
         elif self.slippage_model == SlippageModel.FIXED:
             return self.slippage_percent  # Used as fixed amount
         
-        elif self.slippage_model == SlippageModel.PERCENTAGE:
+        if self.slippage_model == SlippageModel.PERCENTAGE:
+            # Slippage is always a POSITIVE magnitude of price movement against the trader
+            # simulate_long_entry adds this (Price + Slippage = Higher Buy Price)
+            # simulate_short_entry subtracts this (Price - Slippage = Lower Sell Price)
             slippage_amount = price * (self.slippage_percent / Decimal("100"))
-            return slippage_amount if is_buy else -slippage_amount
+            return abs(slippage_amount)
         
         elif self.slippage_model == SlippageModel.VOLUME_BASED:
-            # Simplified volume-based slippage
-            # In real implementation, would factor in actual volume
+            # Simplistic volume based
             base_slippage = price * (self.slippage_percent / Decimal("100"))
             volume_factor = Decimal(str(random.uniform(0.5, 1.5)))
-            return base_slippage * volume_factor
+            return abs(base_slippage * volume_factor)
         
         elif self.slippage_model == SlippageModel.RANDOM:
-            # Random slippage within configured range
+            # Random slippage
             random_factor = Decimal(str(random.uniform(0, float(self.slippage_percent))))
-            return price * (random_factor / Decimal("100"))
+            return abs(price * (random_factor / Decimal("100")))
         
         return Decimal("0")
     
@@ -183,15 +252,19 @@ class MarketSimulator:
         self,
         order_price: Decimal,
         current_price: Decimal,
-        is_buy: bool,
+        is_long: bool,
         is_limit: bool = False,
     ) -> bool:
-        """Check if order can be filled at current price."""
+        """Check if order can be filled at current price.
+        
+        Args:
+            is_long: True for LONG position, False for SHORT position
+        """
         
         if not is_limit:
             return True  # Market orders always fill
         
-        if is_buy:
+        if is_long:
             return current_price <= order_price
         else:
             return current_price >= order_price
@@ -199,13 +272,17 @@ class MarketSimulator:
     def estimate_fill_price(
         self,
         current_price: Decimal,
-        is_buy: bool,
+        is_long: bool,
     ) -> Decimal:
-        """Estimate fill price including spread and slippage."""
+        """Estimate fill price including spread and slippage.
+        
+        Args:
+            is_long: True for LONG position, False for SHORT position
+        """
         
         # Apply spread
         if self.use_bid_ask_spread:
-            if is_buy:
+            if is_long:
                 price = current_price * (Decimal("1") + self.spread_percent / Decimal("100"))
             else:
                 price = current_price * (Decimal("1") - self.spread_percent / Decimal("100"))
@@ -213,9 +290,9 @@ class MarketSimulator:
             price = current_price
         
         # Add slippage estimate
-        slippage = self._calculate_slippage(price, is_buy)
+        slippage = self._calculate_slippage(price, is_long)
         
-        if is_buy:
+        if is_long:
             return price + slippage
         else:
             return price - abs(slippage)

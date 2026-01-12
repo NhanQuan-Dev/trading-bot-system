@@ -124,7 +124,13 @@ class BacktestConfig:
     slippage_model: str = "fixed"
     slippage_percent: Decimal = Decimal("0.001")  # 0.1%
     commission_model: str = "fixed_rate"
-    commission_percent: Decimal = Decimal("0.001")  # 0.1%
+    commission_percent: Decimal = Decimal("0.001")
+    
+    # Advanced Fee Structure
+    taker_fee_rate: Decimal = Decimal("0.0004")  # 0.04%
+    maker_fee_rate: Decimal = Decimal("0.0002")  # 0.02%
+    funding_rate_daily: Decimal = Decimal("0.0003") # 0.03% / day
+    collect_funding_fee: bool = True
     
     # Position sizing
     position_sizing: str = "percent_equity"
@@ -132,6 +138,7 @@ class BacktestConfig:
     max_position_size: Decimal | None = None
     
     # Risk management
+    leverage: int = 1
     stop_loss_percent: Decimal | None = None
     take_profit_percent: Decimal | None = None
     trailing_stop_percent: Decimal | None = None

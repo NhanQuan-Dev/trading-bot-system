@@ -698,3 +698,66 @@ async def get_bot_trades(
             "limit": limit,
             "offset": offset
         }
+
+
+# Period Stats Response Model
+class PeriodDataResponse(BaseModel):
+    """Data for a single time period."""
+    pnl: float
+    trades: int
+    wins: int
+    losses: int
+
+class PeriodStatsResponse(BaseModel):
+    """Response model for period-based stats."""
+    today: PeriodDataResponse
+    yesterday: PeriodDataResponse
+    this_week: PeriodDataResponse
+    last_week: PeriodDataResponse
+    this_month: PeriodDataResponse
+    last_month: PeriodDataResponse
+
+
+@router.get("/{bot_id}/stats/periods", response_model=PeriodStatsResponse)
+async def get_bot_period_stats(
+    bot_id: UUID,
+    current_user = Depends(get_current_user),
+):
+    """
+    Get bot's stats broken down by time periods.
+    
+    Returns stats for:
+        - today / yesterday
+        - this_week / last_week
+        - this_month / last_month
+    
+    Each period contains:
+        - pnl: Total P&L for the period
+        - trades: Number of trades
+        - wins: Winning trades (P&L > 0)
+        - losses: Losing trades (P&L <= 0)
+    """
+    from ...application.services.bot_stats_service import BotStatsService
+    from ...infrastructure.persistence.database import AsyncSessionLocal
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            stats_service = BotStatsService(session)
+            period_stats = await stats_service.get_period_stats(str(bot_id))
+            
+            if not period_stats:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Bot {bot_id} not found or no stats available"
+                )
+            
+            return period_stats
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching period stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

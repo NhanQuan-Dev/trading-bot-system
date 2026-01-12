@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import pandas_ta as ta
 import logging
@@ -8,7 +8,7 @@ from ..base import StrategyBase
 logger = logging.getLogger(__name__)
 
 class TrendFollowingStrategy(StrategyBase):
-    name = "TREND_FOLLOWING"
+    name = "Trend Following"
     description = "Identifies and follows market momentum. Buys when the trend is up (Golden Cross) and sells when it reverses."
 
     def __init__(self, exchange, config: Dict[str, Any]):
@@ -60,3 +60,58 @@ class TrendFollowingStrategy(StrategyBase):
         elif crossover_down:
             logger.info(f"[Trend] Death Cross detected on {symbol}. SELL.")
             await self.sell(symbol, self.quantity)
+
+    def calculate_signal(self, candle: Dict, idx: int, position: Any) -> Optional[Dict]:
+        """Backtest signal calculation."""
+        close_price = float(candle['close'])
+        self.history.append({"close": close_price})
+
+        if len(self.history) > self.min_history * 2:
+            self.history.pop(0)
+            
+        if len(self.history) < self.min_history:
+            return None
+
+        df = pd.DataFrame(self.history)
+        df["fast_ma"] = ta.sma(df["close"], length=self.fast_period)
+        df["slow_ma"] = ta.sma(df["close"], length=self.slow_period)
+        
+        # Check if MA calculated
+        if pd.isna(df["slow_ma"].iloc[-1]):
+            return None
+            
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        crossover_up = (prev["fast_ma"] <= prev["slow_ma"]) and (last["fast_ma"] > last["slow_ma"])
+        crossover_down = (prev["fast_ma"] >= prev["slow_ma"]) and (last["fast_ma"] < last["slow_ma"])
+        
+        signal = None
+        if crossover_up:
+            signal = "open_long"
+        elif crossover_down:
+            signal = "open_short" # or flip
+            # If we just want to close long:
+            # signal = "close_position"
+            
+            # Trend following assumes Long/Short capability usually.
+            # But simpler backtest: Long Only -> Close on Death Cross.
+            if position:
+                signal = "close_position"
+            elif not position:
+                # If shorting supported: signal = "open_short"
+                # For now, let's just close long.
+                signal = None 
+
+        if signal:
+             return {
+                "type": signal,
+                "quantity": float(self.quantity),
+                "metadata": {
+                    "strategy": "Trend Following (SMA)",
+                    "fast_ma": float(last["fast_ma"]),
+                    "slow_ma": float(last["slow_ma"]),
+                    "crossover": "Golden Cross" if signal == "open_long" else "Death Cross"
+                }
+            }
+        return None

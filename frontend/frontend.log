@@ -3,13 +3,8 @@
 > vite
 
 
-  VITE v5.4.19  ready in 270 ms
+  VITE v5.4.19  ready in 318 ms
 
   ➜  Local:   http://localhost:8080/
-  ➜  Network: http://192.168.1.8:8080/
+  ➜  Network: http://192.168.1.11:8080/
   ➜  Network: http://172.18.0.1:8080/
-Browserslist: browsers data (caniuse-lite) is 7 months old. Please run:
-  npx update-browserslist-db@latest
-  Why you should do it regularly: https://github.com/browserslist/update-db#readme
-6:23:44 PM [vite] hmr update /src/pages/Bots.tsx, /src/index.css
-6:26:38 PM [vite] hmr update /src/pages/BotDetail.tsx, /src/index.css

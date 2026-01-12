@@ -21,14 +21,22 @@ class GridTradingStrategy(StrategyBase):
         self.grids: List[Dict] = []
         self._initialize_grids()
 
-    def _initialize_grids(self):
+    def _initialize_grids(self, current_price: Decimal = None):
         """Calculate grid price levels."""
+        # Auto-config if defaults are 0 and we have a price
+        if (self.upper_price <= 0 or self.lower_price <= 0) and current_price:
+             self.upper_price = current_price * Decimal("1.1") # +10%
+             self.lower_price = current_price * Decimal("0.9") # -10%
+             logger.info(f"[Grid] Auto-configured levels: {self.lower_price} - {self.upper_price}")
+
         if self.upper_price <= self.lower_price or self.grid_levels <= 0:
-            logger.warning("[Grid] Invalid grid parameters")
+            if current_price: # Only warn if we attempted to init with a price
+                 logger.warning("[Grid] Invalid grid parameters (Upper <= Lower)")
             return
 
         step = (self.upper_price - self.lower_price) / self.grid_levels
         
+        self.grids = [] # Reset
         for i in range(self.grid_levels + 1):
             price = self.lower_price + (step * i)
             self.grids.append({
@@ -108,4 +116,58 @@ class GridTradingStrategy(StrategyBase):
                 logger.info(f"[Grid] Placed {side} at {grid['price']}")
         except Exception as e:
             logger.error(f"[Grid] Failed to place {side} at {grid['price']}: {e}")
+
+    def calculate_signal(self, candle: Dict, idx: int, position: Any) -> Optional[Dict]:
+        """Backtest signal calculation."""
+        current_price = Decimal(str(candle['close']))
+        
+        # 1. Check if we need to initialize grids
+        if not self.grids:
+            self._initialize_grids(current_price)
+            
+        # 2. Check for fills against virtual grid
+        # In backtest, we don't have real open orders. We check price action.
+        signal = None
+        quantity = Decimal("0")
+        reason = ""
+        
+        # Simple simulated grid logic:
+        # If price drops to a lower grid level -> Buy
+        # If price rises to a higher grid level -> Sell (if we have position)
+        
+        # Find closest grid level below current price
+        active_level_idx = -1
+        for i, grid in enumerate(self.grids):
+            if current_price >= grid["price"]:
+                active_level_idx = i
+            else:
+                break
+                
+        # If price crossed a level downwards (Buy zone)
+        # This is simplified. Real grid needs state memory of "bought at level X".
+        # For this template, we just buy if price is in lower half of grid.
+        
+        mid_price = (self.upper_price + self.lower_price) / 2
+        
+        if current_price < mid_price and not position:
+            return {
+                "type": "open_long",
+                "quantity": float(self.quantity_per_grid * 5), # Simulate buying multiple grids
+                "metadata": {
+                    "strategy": "Grid Trading",
+                    "reason": "Price in Buy Zone (Lower Half)",
+                    "price": float(current_price)
+                }
+            }
+        elif current_price > mid_price and position:
+            return {
+                "type": "close_position",
+                "metadata": {
+                    "strategy": "Grid Trading",
+                    "reason": "Price in Sell Zone (Upper Half)",
+                    "price": float(current_price)
+                }
+            }
+            
+        return None
 

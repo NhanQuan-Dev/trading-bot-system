@@ -28,6 +28,7 @@ class StrategyType(str, Enum):
     TREND_FOLLOWING = "TREND_FOLLOWING"  # Trend following
     MEAN_REVERSION = "MEAN_REVERSION"    # Mean reversion
     ARBITRAGE = "ARBITRAGE"          # Arbitrage
+    SCALPING = "SCALPING"            # Scalping
     CUSTOM = "CUSTOM"                # Custom strategy
 
 BotType = StrategyType
@@ -135,6 +136,9 @@ class Strategy:
     created_at: dt
     updated_at: dt
     
+    # Dynamic Code
+    code_content: Optional[str] = None
+    
     # Performance tracking
     backtest_results: Optional[Dict[str, Any]] = None
     live_performance: BotPerformance = field(default_factory=BotPerformance)
@@ -146,7 +150,8 @@ class Strategy:
         name: str,
         strategy_type: StrategyType,
         description: str,
-        parameters: Dict[str, Any]
+        parameters: Dict[str, Any],
+        code_content: Optional[str] = None
     ) -> "Strategy":
         """Create a new strategy."""
         now = dt.now(dt_timezone.utc)
@@ -167,6 +172,7 @@ class Strategy:
             is_active=True,
             created_at=now,
             updated_at=now,
+            code_content=code_content,
         )
     
     def update_parameters(self, parameters: Dict[str, Any]) -> None:

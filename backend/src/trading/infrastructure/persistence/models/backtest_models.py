@@ -178,5 +178,9 @@ class BacktestTradeModel(Base, UUIDPrimaryKeyMixin):
     mae = Column(DECIMAL(20, 8), nullable=True, comment="Maximum Adverse Excursion")
     mfe = Column(DECIMAL(20, 8), nullable=True, comment="Maximum Favorable Excursion")
     
+    # Metadata
+    entry_reason = Column(JSONType, nullable=True, comment="Entry reasons metadata")
+    exit_reason = Column(JSONType, nullable=True, comment="Exit reasons metadata")
+    
     # Relationship
     result = relationship("BacktestResultModel", foreign_keys=[result_id])

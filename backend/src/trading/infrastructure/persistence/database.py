@@ -5,13 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 import os
-from dotenv import load_dotenv
+from ..config.settings import get_settings
 
-load_dotenv()
+
+
+settings = get_settings()
 
 # Database URLs
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5432/trading_platform")
-DATABASE_SYNC_URL = os.getenv("DATABASE_SYNC_URL", "postgresql+psycopg2://postgres:password@localhost:5432/trading_platform")
+DATABASE_URL = settings.DATABASE_URL
+DATABASE_SYNC_URL = settings.DATABASE_SYNC_URL
 
 # Create async engine for application use
 async_engine = create_async_engine(

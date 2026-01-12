@@ -122,7 +122,14 @@ class BinanceAdapter(ExchangeGateway):
         if symbol:
             params["symbol"] = self._normalize_symbol(symbol)
             
-        return await self._signed_request("GET", "/fapi/v2/positionRisk", params)
+        response = await self._signed_request("GET", "/fapi/v2/positionRisk", params)
+        
+        # Debug: Print raw response to see all fields from Binance
+        if response:
+            for pos in response[:2]:  # Print first 2 only to not flood logs
+                print(f"DEBUG [Position Risk] Raw: {pos}")
+        
+        return response
 
     
     async def get_balance(self, asset: str) -> BalanceData:

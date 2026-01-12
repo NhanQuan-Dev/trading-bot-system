@@ -1,12 +1,12 @@
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import logging
 from ..base import StrategyBase
 
 logger = logging.getLogger(__name__)
 
 class ArbitrageStrategy(StrategyBase):
-    name = "ARBITRAGE"
+    name = "Arbitrage"
     description = "Exploits price differences of the same asset across different markets or pairs to generate risk-free profit."
 
     def __init__(self, exchange, config: Dict[str, Any]):
@@ -42,3 +42,30 @@ class ArbitrageStrategy(StrategyBase):
             
         except Exception as e:
             logger.error(f"[Arb] Error checking prices: {e}")
+
+    def calculate_signal(self, candle: Dict, idx: int, position: Any) -> Optional[Dict]:
+        """
+        Backtest signal calculation.
+        Note: True Arbitrage requires multi-exchange data which is not available in single-symbol backtest.
+        This provides a simulated entry for demonstration.
+        """
+        # Simulate Arb opportunity every 50 candles
+        if idx % 50 == 0 and not position:
+             return {
+                "type": "open_long",
+                "quantity": float(self.quantity),
+                "metadata": {
+                    "strategy": "Arbitrage (Simulated)",
+                    "spread": 0.015,
+                    "exchanges": "Binance vs Coinbase (Sim)"
+                }
+             }
+        elif idx % 50 == 5 and position: # Close quickly
+             return {
+                "type": "close_position",
+                "metadata": {
+                    "strategy": "Arbitrage (Simulated)",
+                    "reason": "Spread closed"
+                }
+             }
+        return None
