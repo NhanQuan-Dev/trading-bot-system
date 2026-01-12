@@ -207,7 +207,9 @@ class BacktestEngine:
                 )
                 return
 
-            sl_tp_result = self._check_sl_tp_trailing_with_high_low(candle_high, candle_low)
+            # Spec-required: Pass candle_open for realistic price path assumption
+            candle_open = Decimal(str(candle.get("open", candle["close"])))
+            sl_tp_result = self._check_sl_tp_trailing_with_high_low(candle_high, candle_low, candle_open)
             
             if sl_tp_result:
                 close_price, reason = sl_tp_result
@@ -755,19 +757,22 @@ class BacktestEngine:
     def _check_sl_tp_trailing_with_high_low(
         self, 
         candle_high: Decimal, 
-        candle_low: Decimal
+        candle_low: Decimal,
+        candle_open: Optional[Decimal] = None,
     ) -> Optional[tuple]:
         """
-        Level 2 SL/TP/Trailing Check: Use High/Low prices for accurate simulation.
+        Level 2 SL/TP/Trailing Check with Price Path Assumption.
         
         Checks:
         1. Fixed Stop Loss
         2. Fixed Take Profit
         3. Trailing Stop (dynamic)
+        4. Conflict resolution using price_path_assumption
         
         Args:
             candle_high: High price of the candle
             candle_low: Low price of the candle
+            candle_open: Open price (for realistic assumption)
             
         Returns:
             Tuple (close_price, reason) if triggered, None otherwise
@@ -782,36 +787,128 @@ class BacktestEngine:
         if self.current_position.direction == TradeDirection.LONG:
             # LONG: SL/Trailing triggers on Low, TP triggers on High
             
-            # 1. Check Fixed Stop Loss first (highest priority for worst case)
-            if stop_loss and candle_low <= stop_loss:
-                logger.debug(f"LONG SL triggered: low={candle_low} <= sl={stop_loss}")
-                return (stop_loss, "Stop Loss")
+            # Determine which can trigger
+            sl_triggered = stop_loss and candle_low <= stop_loss
+            trailing_triggered = trailing_stop and candle_low <= trailing_stop
+            tp_triggered = take_profit and candle_high >= take_profit
             
-            # 2. Check Trailing Stop
-            if trailing_stop and candle_low <= trailing_stop:
-                logger.debug(f"LONG Trailing Stop triggered: low={candle_low} <= trailing={trailing_stop}")
-                return (trailing_stop, "Trailing Stop")
+            # Use worst SL (trailing or fixed)
+            effective_sl = None
+            sl_reason = None
+            if sl_triggered and trailing_triggered:
+                # Both triggered, use whichever is worse (lower for LONG)
+                if trailing_stop < stop_loss:
+                    effective_sl = trailing_stop
+                    sl_reason = "Trailing Stop"
+                else:
+                    effective_sl = stop_loss
+                    sl_reason = "Stop Loss"
+            elif sl_triggered:
+                effective_sl = stop_loss
+                sl_reason = "Stop Loss"
+            elif trailing_triggered:
+                effective_sl = trailing_stop
+                sl_reason = "Trailing Stop"
             
-            # 3. Check Take Profit
-            if take_profit and candle_high >= take_profit:
+            # Spec-required: Handle TP/SL conflict with price_path_assumption
+            if effective_sl and tp_triggered:
+                # CONFLICT: Both can trigger in same candle
+                assumption = self.config.price_path_assumption
+                
+                if assumption == "neutral":
+                    # Conservative: SL before TP
+                    logger.debug(f"TP/SL conflict (LONG): NEUTRAL → SL wins")
+                    return (effective_sl, f"{sl_reason} (Neutral assumption)")
+                
+                elif assumption == "optimistic":
+                    # Optimistic: TP before SL
+                    logger.debug(f"TP/SL conflict (LONG): OPTIMISTIC → TP wins")
+                    return (take_profit, "Take Profit (Optimistic assumption)")
+                
+                elif assumption == "realistic" and candle_open:
+                    # Realistic: Based on candle open direction
+                    if candle_open < self.current_position.avg_entry_price:
+                        # Opened down → SL likely hit first
+                        logger.debug(f"TP/SL conflict (LONG): REALISTIC (open down) → SL wins")
+                        return (effective_sl, f"{sl_reason} (Realistic assumption)")
+                    else:
+                        # Opened up → TP likely hit first
+                        logger.debug(f"TP/SL conflict (LONG): REALISTIC (open up) → TP wins")
+                        return (take_profit, "Take Profit (Realistic assumption)")
+                else:
+                    # Fallback to neutral if realistic missing data
+                    logger.debug(f"TP/SL conflict (LONG): Fallback to NEUTRAL")
+                    return (effective_sl, f"{sl_reason} (Neutral fallback)")
+            
+            # No conflict: return whichever triggered
+            if effective_sl:
+                logger.debug(f"LONG {sl_reason} triggered: low={candle_low} <= {effective_sl}")
+                return (effective_sl, sl_reason)
+            if tp_triggered:
                 logger.debug(f"LONG TP triggered: high={candle_high} >= tp={take_profit}")
                 return (take_profit, "Take Profit")
         
         else:  # SHORT position
             # SHORT: SL/Trailing triggers on High, TP triggers on Low
             
-            # 1. Check Fixed Stop Loss first
-            if stop_loss and candle_high >= stop_loss:
-                logger.debug(f"SHORT SL triggered: high={candle_high} >= sl={stop_loss}")
-                return (stop_loss, "Stop Loss")
+            # Determine which can trigger
+            sl_triggered = stop_loss and candle_high >= stop_loss
+            trailing_triggered = trailing_stop and candle_high >= trailing_stop
+            tp_triggered = take_profit and candle_low <= take_profit
             
-            # 2. Check Trailing Stop
-            if trailing_stop and candle_high >= trailing_stop:
-                logger.debug(f"SHORT Trailing Stop triggered: high={candle_high} >= trailing={trailing_stop}")
-                return (trailing_stop, "Trailing Stop")
+            # Use worst SL (trailing or fixed)
+            effective_sl = None
+            sl_reason = None
+            if sl_triggered and trailing_triggered:
+                # Both triggered, use whichever is worse (higher for SHORT)
+                if trailing_stop > stop_loss:
+                    effective_sl = trailing_stop
+                    sl_reason = "Trailing Stop"
+                else:
+                    effective_sl = stop_loss
+                    sl_reason = "Stop Loss"
+            elif sl_triggered:
+                effective_sl = stop_loss
+                sl_reason = "Stop Loss"
+            elif trailing_triggered:
+                effective_sl = trailing_stop
+                sl_reason = "Trailing Stop"
             
-            # 3. Check Take Profit
-            if take_profit and candle_low <= take_profit:
+            # Spec-required: Handle TP/SL conflict with price_path_assumption
+            if effective_sl and tp_triggered:
+                # CONFLICT: Both can trigger in same candle
+                assumption = self.config.price_path_assumption
+                
+                if assumption == "neutral":
+                    # Conservative: SL before TP
+                    logger.debug(f"TP/SL conflict (SHORT): NEUTRAL → SL wins")
+                    return (effective_sl, f"{sl_reason} (Neutral assumption)")
+                
+                elif assumption == "optimistic":
+                    # Optimistic: TP before SL
+                    logger.debug(f"TP/SL conflict (SHORT): OPTIMISTIC → TP wins")
+                    return (take_profit, "Take Profit (Optimistic assumption)")
+                
+                elif assumption == "realistic" and candle_open:
+                    # Realistic: Based on candle open direction
+                    if candle_open > self.current_position.avg_entry_price:
+                        # Opened up → SL likely hit first
+                        logger.debug(f"TP/SL conflict (SHORT): REALISTIC (open up) → SL wins")
+                        return (effective_sl, f"{sl_reason} (Realistic assumption)")
+                    else:
+                        # Opened down → TP likely hit first
+                        logger.debug(f"TP/SL conflict (SHORT): REALISTIC (open down) → TP wins")
+                        return (take_profit, "Take Profit (Realistic assumption)")
+                else:
+                    # Fallback to neutral
+                    logger.debug(f"TP/SL conflict (SHORT): Fallback to NEUTRAL")
+                    return (effective_sl, f"{sl_reason} (Neutral fallback)")
+            
+            # No conflict: return whichever triggered
+            if effective_sl:
+                logger.debug(f"SHORT {sl_reason} triggered: high={candle_high} >= {effective_sl}")
+                return (effective_sl, sl_reason)
+            if tp_triggered:
                 logger.debug(f"SHORT TP triggered: low={candle_low} <= tp={take_profit}")
                 return (take_profit, "Take Profit")
         
@@ -823,7 +920,8 @@ class BacktestEngine:
         candle_low: Decimal
     ) -> Optional[tuple]:
         """Legacy alias - redirects to new unified method."""
-        return self._check_sl_tp_trailing_with_high_low(candle_high, candle_low)
+        # Note: candle_open defaults to None here (called from old code path)
+        return self._check_sl_tp_trailing_with_high_low(candle_high, candle_low, None)
     
     def _should_close_position(self, current_price: Decimal) -> bool:
         """Legacy method - check if position should be closed (Close price only).
