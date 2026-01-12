@@ -170,6 +170,13 @@ async def run_backtest(
             taker_fee_rate=request.config.taker_fee_rate / 100,
             maker_fee_rate=request.config.maker_fee_rate / 100,
             funding_rate_daily=request.config.funding_rate_daily / 100,
+            
+            # Phase 1-3 New Fields
+            fill_policy=request.config.fill_policy,
+            price_path_assumption=request.config.price_path_assumption,
+            signal_timeframe=request.config.signal_timeframe,
+            enable_setup_trigger_model=request.config.enable_setup_trigger_model,
+            setup_validity_window_minutes=request.config.setup_validity_window_minutes,
         )
         logger.info(f"DEBUG CONTROLLER: Created Config - Leverage: {config.leverage}, Taker: {config.taker_fee_rate}, Maker: {config.maker_fee_rate}, Funding: {config.funding_rate_daily}")
         
