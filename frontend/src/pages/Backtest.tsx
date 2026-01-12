@@ -139,6 +139,14 @@ export default function Backtest() {
   };
 
 
+  // Reset form state when dialog opens
+  useEffect(() => {
+    if (isCreateOpen) {
+      setFormSignalTimeframe('1m');
+      setFormFillPolicy('optimistic');
+    }
+  }, [isCreateOpen]);
+
   const fetchStrategies = async () => {
     console.log('[DEBUG] fetchStrategies START');
     try {
