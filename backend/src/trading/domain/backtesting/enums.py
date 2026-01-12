@@ -60,3 +60,17 @@ class ExitReason(str, Enum):
     END_OF_DATA = "end_of_data"
     MANUAL = "manual"
     MARGIN_CALL = "margin_call"
+
+
+class FillPolicy(str, Enum):
+    """Fill policy for limit orders."""
+    OPTIMISTIC = "optimistic"  # Touch is fill
+    NEUTRAL = "neutral"  # Requires proper cross + basic filters
+    STRICT = "strict"  # Cross + wick filter + spread
+
+
+class PricePathAssumption(str, Enum):
+    """Price path assumption for TP/SL conflict resolution."""
+    NEUTRAL = "neutral"  # SL before TP (most conservative)
+    OPTIMISTIC = "optimistic"  # TP before SL
+    REALISTIC = "realistic"  # Based on candle open direction

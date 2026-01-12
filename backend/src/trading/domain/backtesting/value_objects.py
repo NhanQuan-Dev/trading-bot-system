@@ -148,6 +148,10 @@ class BacktestConfig:
     use_market_open_prices: bool = False
     execution_delay_bars: int = 0
     
+    # Spec-required: Fill policy configuration
+    fill_policy: str = "optimistic"  # optimistic | neutral | strict
+    price_path_assumption: str = "neutral"  # neutral | optimistic | realistic
+    
     # Other
     compound_returns: bool = True
     reinvest_profits: bool = True

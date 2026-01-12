@@ -19,6 +19,7 @@ class OrderFill:
     commission: Decimal
     slippage: Decimal
     fill_time: str
+    fill_conditions_met: Optional[dict] = None  # Debug info for fill decision
 
 
 class MarketSimulator:
@@ -32,6 +33,7 @@ class MarketSimulator:
         commission_rate: Decimal = Decimal("0.001"),
         use_bid_ask_spread: bool = False,
         spread_percent: Decimal = Decimal("0.05"),
+        fill_policy: str = "optimistic",  # optimistic | neutral | strict
     ):
         """Initialize market simulator."""
         self.slippage_model = slippage_model
@@ -40,6 +42,7 @@ class MarketSimulator:
         self.commission_rate = commission_rate
         self.use_bid_ask_spread = use_bid_ask_spread
         self.spread_percent = spread_percent
+        self.fill_policy = fill_policy
     
     def simulate_long_entry(
         self,
@@ -71,30 +74,75 @@ class MarketSimulator:
         
         # For LIMIT orders: Check if price reached the limit during candle
         if limit_price:
-            # LONG Limit: Fill if price went DOWN to limit (Low <= limit_price)
-            if candle_low is not None and candle_low <= limit_price:
-                # Limit order filled at limit price
-                filled_price = limit_price
-                slippage = Decimal("0")  # Limit orders have no slippage
-                commission = self._calculate_commission(filled_price, quantity)
-                logger.debug(f"LONG Limit filled: low={candle_low} <= limit={limit_price}")
-                return OrderFill(
-                    filled_price=filled_price,
-                    filled_quantity=quantity,
-                    commission=commission,
-                    slippage=slippage,
-                    fill_time=timestamp,
-                )
-            else:
-                # Limit not reached
-                logger.debug(f"LONG Limit not filled: low={candle_low} > limit={limit_price}")
+            fill_conditions = {}
+            candle_open = current_price  # Assume open = close if not provided separately
+            
+            # Spec-required: Gap Detection
+            # LONG Limit: Reject if open already gapped ABOVE limit (unfavorable)
+            if candle_low is not None and candle_open > limit_price and candle_low > limit_price:
+                # Price gapped past limit unfavorably (opened above and never came down)
+                fill_conditions["gap_check"] = False
+                fill_conditions["reason"] = f"Gap: open={candle_open} > limit={limit_price}, low={candle_low}"
+                logger.debug(f"LONG Limit NOT filled (gap): {fill_conditions['reason']}")
                 return OrderFill(
                     filled_price=Decimal("0"),
                     filled_quantity=Decimal("0"),
                     commission=Decimal("0"),
                     slippage=Decimal("0"),
                     fill_time=timestamp,
+                    fill_conditions_met=fill_conditions,
                 )
+            
+            # Check if price touched the limit
+            price_touched_limit = candle_low is not None and candle_low <= limit_price
+            fill_conditions["price_touched"] = price_touched_limit
+            
+            if not price_touched_limit:
+                fill_conditions["reason"] = f"Price didn't touch: low={candle_low} > limit={limit_price}"
+                logger.debug(f"LONG Limit not filled: {fill_conditions['reason']}")
+                return OrderFill(
+                    filled_price=Decimal("0"),
+                    filled_quantity=Decimal("0"),
+                    commission=Decimal("0"),
+                    slippage=Decimal("0"),
+                    fill_time=timestamp,
+                    fill_conditions_met=fill_conditions,
+                )
+            
+            # Apply fill policy
+            if self.fill_policy == "neutral" or self.fill_policy == "strict":
+                # Neutral/Strict: Require price to CROSS (not just touch)
+                # For LONG limit: open should be ABOVE limit, and low BELOW limit
+                price_crossed = candle_open > limit_price and candle_low <= limit_price
+                fill_conditions["price_crossed"] = price_crossed
+                
+                if not price_crossed:
+                    fill_conditions["reason"] = "Neutral/Strict policy: No cross detected"
+                    logger.debug(f"LONG Limit not filled (policy={self.fill_policy}): {fill_conditions['reason']}")
+                    return OrderFill(
+                        filled_price=Decimal("0"),
+                        filled_quantity=Decimal("0"),
+                        commission=Decimal("0"),
+                        slippage=Decimal("0"),
+                        fill_time=timestamp,
+                        fill_conditions_met=fill_conditions,
+                    )
+            
+            # If we reach here: Fill is approved
+            fill_conditions["filled"] = True
+            fill_conditions["policy"] = self.fill_policy
+            filled_price = limit_price
+            slippage = Decimal("0")  # Limit orders have no slippage
+            commission = self._calculate_commission(filled_price, quantity)
+            logger.debug(f"LONG Limit filled: policy={self.fill_policy}, low={candle_low} <= limit={limit_price}")
+            return OrderFill(
+                filled_price=filled_price,
+                filled_quantity=quantity,
+                commission=commission,
+                slippage=slippage,
+                fill_time=timestamp,
+                fill_conditions_met=fill_conditions,
+            )
         
         # For MARKET orders: Use current price with spread and slippage
         if self.use_bid_ask_spread:

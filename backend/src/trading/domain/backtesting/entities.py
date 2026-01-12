@@ -48,6 +48,18 @@ class BacktestTrade:
     entry_reason: Optional[Dict[str, Any]] = None
     exit_reason: Optional[Dict[str, Any]] = None
     
+    # Spec-required: Timeline tracking
+    signal_time: Optional[datetime] = None  # HTF close time when signal generated
+    execution_delay_seconds: Optional[float] = None  # Calculated as (entry_time - signal_time).total_seconds()
+    
+    # Spec-required: Intra-trade metrics
+    max_drawdown: Decimal = Decimal("0")  # Maximum adverse movement during trade
+    max_runup: Decimal = Decimal("0")  # Maximum favorable movement during trade
+    
+    # Spec-required: Fill metadata for debugging
+    fill_policy_used: Optional[str] = None  # Which policy was used for this fill
+    fill_conditions_met: Optional[Dict[str, bool]] = None  # Debug info: which conditions passed/failed
+    
     def close_trade(
         self,
         exit_time: datetime,

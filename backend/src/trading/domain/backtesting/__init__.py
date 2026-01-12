@@ -21,6 +21,8 @@ from .enums import (
     CommissionModel,
     PositionSizing,
     TradeDirection,
+    FillPolicy,
+    PricePathAssumption,
 )
 from .repositories import IBacktestRepository
 
@@ -44,6 +46,8 @@ __all__ = [
     "CommissionModel",
     "PositionSizing",
     "TradeDirection",
+    "FillPolicy",
+    "PricePathAssumption",
     # Repositories
     "IBacktestRepository",
 ]

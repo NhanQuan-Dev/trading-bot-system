@@ -14,6 +14,8 @@ from ...domain.backtesting import (
     CommissionModel,
     PositionSizing,
     TradeDirection,
+    FillPolicy,
+   PricePathAssumption,
 )
 
 
@@ -77,6 +79,16 @@ class BacktestConfigRequest(BaseModel):
     strategy_params: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Strategy-specific configuration parameters"
+    )
+    
+    # Spec-required: Fill policy configuration
+    fill_policy: FillPolicy = Field(
+        default=FillPolicy.OPTIMISTIC,
+        description="Fill policy: optimistic/neutral/strict"
+    )
+    price_path_assumption: PricePathAssumption = Field(
+        default=PricePathAssumption.NEUTRAL,
+        description="Price path assumption for TP/SL conflict"
     )
     
     model_config = ConfigDict(use_enum_values=False)
@@ -197,6 +209,18 @@ class TradeResponse(BaseModel):
     mfe: Optional[Decimal]
     is_winner: bool
     entry_reason: Optional[Dict[str, Any]] = None
+    
+    # Spec-required: Timeline tracking
+    signal_time: Optional[str] = None
+    execution_delay_seconds: Optional[float] = None
+    
+    # Spec-required: Intra-trade metrics
+    max_drawdown: Optional[Decimal] = None
+    max_runup: Optional[Decimal] = None
+    
+    # Spec-required: Fill metadata
+    fill_policy_used: Optional[str] = None
+    fill_conditions_met: Optional[Dict[str, bool]] = None
     
     model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
