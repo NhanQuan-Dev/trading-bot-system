@@ -181,6 +181,12 @@ class BacktestEngine:
         if self.current_position:
             self.current_position.update_unrealized_pnl(current_price)
             
+            # Spec-required: Track intra-trade max drawdown and runup
+            if self.current_position.unrealized_pnl < self.current_trade_max_drawdown:
+                self.current_trade_max_drawdown = self.current_position.unrealized_pnl
+            if self.current_position.unrealized_pnl > self.current_trade_max_runup:
+                self.current_trade_max_runup = self.current_position.unrealized_pnl
+            
             # Level 2 SL/TP Check: Use High/Low prices for more accurate simulation
             candle_high = Decimal(str(candle.get("high", candle["close"])))
             candle_low = Decimal(str(candle.get("low", candle["close"])))
