@@ -346,6 +346,7 @@ class BacktestRepository(IBacktestRepository):
         result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(selectinload(BacktestRunModel.exchange_connection))
             .options(
                 joinedload(BacktestRunModel.result)
                 .defer(BacktestResultModel.equity_curve)
@@ -371,6 +372,7 @@ class BacktestRepository(IBacktestRepository):
         result = await self._session.execute(
             select(BacktestRunModel)
             .options(selectinload(BacktestRunModel.strategy))
+            .options(selectinload(BacktestRunModel.exchange_connection))
             .options(
                 joinedload(BacktestRunModel.result)
                 .defer(BacktestResultModel.equity_curve)
@@ -470,7 +472,7 @@ class BacktestRepository(IBacktestRepository):
     async def get_running_backtests(self, user_id: Optional[UUID] = None) -> List[BacktestRun]:
         """Get currently running backtests."""
         
-        query = select(BacktestRunModel).options(selectinload(BacktestRunModel.strategy)).options(selectinload(BacktestRunModel.result)).where(
+        query = select(BacktestRunModel).options(selectinload(BacktestRunModel.strategy)).options(selectinload(BacktestRunModel.exchange_connection)).options(selectinload(BacktestRunModel.result)).where(
             BacktestRunModel.status.in_([BacktestStatus.PENDING, BacktestStatus.RUNNING])
         )
         
