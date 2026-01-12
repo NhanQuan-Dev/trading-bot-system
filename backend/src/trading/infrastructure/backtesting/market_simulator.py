@@ -192,30 +192,75 @@ class MarketSimulator:
         
         # For LIMIT orders: Check if price reached the limit during candle
         if limit_price:
-            # SHORT Limit: Fill if price went UP to limit (High >= limit_price)
-            if candle_high is not None and candle_high >= limit_price:
-                # Limit order filled at limit price
-                filled_price = limit_price
-                slippage = Decimal("0")  # Limit orders have no slippage
-                commission = self._calculate_commission(filled_price, quantity)
-                logger.debug(f"SHORT Limit filled: high={candle_high} >= limit={limit_price}")
-                return OrderFill(
-                    filled_price=filled_price,
-                    filled_quantity=quantity,
-                    commission=commission,
-                    slippage=slippage,
-                    fill_time=timestamp,
-                )
-            else:
-                # Limit not reached
-                logger.debug(f"SHORT Limit not filled: high={candle_high} < limit={limit_price}")
+            fill_conditions = {}
+            candle_open = current_price  # Assume open = close if not provided separately
+            
+            # Spec-required: Gap Detection
+            # SHORT Limit: Reject if open already gapped BELOW limit (unfavorable)
+            if candle_high is not None and candle_open < limit_price and candle_high < limit_price:
+                # Price gapped past limit unfavorably (opened below and never came up)
+                fill_conditions["gap_check"] = False
+                fill_conditions["reason"] = f"Gap: open={candle_open} < limit={limit_price}, high={candle_high}"
+                logger.debug(f"SHORT Limit NOT filled (gap): {fill_conditions['reason']}")
                 return OrderFill(
                     filled_price=Decimal("0"),
                     filled_quantity=Decimal("0"),
                     commission=Decimal("0"),
                     slippage=Decimal("0"),
                     fill_time=timestamp,
+                    fill_conditions_met=fill_conditions,
                 )
+            
+            # Check if price touched the limit
+            price_touched_limit = candle_high is not None and candle_high >= limit_price
+            fill_conditions["price_touched"] = price_touched_limit
+            
+            if not price_touched_limit:
+                fill_conditions["reason"] = f"Price didn't touch: high={candle_high} < limit={limit_price}"
+                logger.debug(f"SHORT Limit not filled: {fill_conditions['reason']}")
+                return OrderFill(
+                    filled_price=Decimal("0"),
+                    filled_quantity=Decimal("0"),
+                    commission=Decimal("0"),
+                    slippage=Decimal("0"),
+                    fill_time=timestamp,
+                    fill_conditions_met=fill_conditions,
+                )
+            
+            # Apply fill policy
+            if self.fill_policy == "neutral" or self.fill_policy == "strict":
+                # Neutral/Strict: Require price to CROSS (not just touch)
+                # For SHORT limit: open should be BELOW limit, and high ABOVE limit
+                price_crossed = candle_open < limit_price and candle_high >= limit_price
+                fill_conditions["price_crossed"] = price_crossed
+                
+                if not price_crossed:
+                    fill_conditions["reason"] = "Neutral/Strict policy: No cross detected"
+                    logger.debug(f"SHORT Limit not filled (policy={self.fill_policy}): {fill_conditions['reason']}")
+                    return OrderFill(
+                        filled_price=Decimal("0"),
+                        filled_quantity=Decimal("0"),
+                        commission=Decimal("0"),
+                        slippage=Decimal("0"),
+                        fill_time=timestamp,
+                        fill_conditions_met=fill_conditions,
+                    )
+            
+            # If we reach here: Fill is approved
+            fill_conditions["filled"] = True
+            fill_conditions["policy"] = self.fill_policy
+            filled_price = limit_price
+            slippage = Decimal("0")  # Limit orders have no slippage
+            commission = self._calculate_commission(filled_price, quantity)
+            logger.debug(f"SHORT Limit filled: policy={self.fill_policy}, high={candle_high} >= limit={limit_price}")
+            return OrderFill(
+                filled_price=filled_price,
+                filled_quantity=quantity,
+                commission=commission,
+                slippage=slippage,
+                fill_time=timestamp,
+                fill_conditions_met=fill_conditions,
+            )
         
         # For MARKET orders: Use current price with spread and slippage
         if self.use_bid_ask_spread:

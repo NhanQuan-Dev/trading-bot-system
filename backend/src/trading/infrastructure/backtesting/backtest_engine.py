@@ -40,6 +40,7 @@ class BacktestEngine:
             slippage_percent=config.slippage_percent,
             commission_model=config.commission_model,
             commission_rate=config.commission_percent,  # Note: MarketSimulator param is commission_rate
+            fill_policy=config.fill_policy,  # Spec-required: Pass fill policy configuration
         )
         
         # State
@@ -48,6 +49,13 @@ class BacktestEngine:
         self.current_position: Optional[BacktestPosition] = None
         self.trades: List[BacktestTrade] = []
         self.equity_curve: List[EquityCurvePoint] = []
+        
+        # Spec-required: Current trade tracking
+        self.current_trade_signal_time: Optional[datetime] = None
+        self.current_trade_max_drawdown: Decimal = Decimal("0")
+        self.current_trade_max_runup: Decimal = Decimal("0")
+        self.current_trade_fill_policy: Optional[str] = None
+        self.current_trade_fill_conditions: Optional[dict] = None
         
         # Stats
         self.equity_curve: List[EquityCurvePoint] = []
@@ -326,6 +334,13 @@ class BacktestEngine:
         self.current_position.entry_commission = fill.commission
         self.current_position.metadata = signal.get("metadata", signal.get("reason"))
         
+        # Spec-required: Initialize trade tracking
+        self.current_trade_signal_time = timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp)
+        self.current_trade_max_drawdown = Decimal("0")
+        self.current_trade_max_runup = Decimal("0")
+        self.current_trade_fill_policy = self.config.fill_policy
+        self.current_trade_fill_conditions = fill.fill_conditions_met
+        
         # Note: Don't modify equity when opening position
         # Equity will be updated when position is closed with realized PnL
         
@@ -445,6 +460,12 @@ class BacktestEngine:
         # Normalize exit reason to dict
         exit_reason_dict = reason if isinstance(reason, dict) else {"reason": reason}
 
+        # Spec-required: Calculate execution delay
+        entry_time_dt = self.current_position.entry_time if isinstance(self.current_position.entry_time, datetime) else datetime.fromisoformat(self.current_position.entry_time)
+        execution_delay_seconds = None
+        if self.current_trade_signal_time:
+            execution_delay_seconds = (entry_time_dt - self.current_trade_signal_time).total_seconds()
+
         # Create trade record
         trade = BacktestTrade(
             symbol=self.config.symbol,
@@ -452,7 +473,7 @@ class BacktestEngine:
             entry_price=self.current_position.avg_entry_price,
             exit_price=fill.filled_price,
             entry_quantity=fill.filled_quantity,
-            entry_time=self.current_position.entry_time if hasattr(self.current_position, 'entry_time') else datetime.utcnow(),
+            entry_time=entry_time_dt,
             exit_time=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
             gross_pnl=pnl,
             net_pnl=net_pnl,
@@ -463,12 +484,26 @@ class BacktestEngine:
             exit_slippage=fill.slippage,
             entry_reason=getattr(self.current_position, 'metadata', None),
             exit_reason=exit_reason_dict,
+            # Spec-required fields
+            signal_time=self.current_trade_signal_time,
+            execution_delay_seconds=execution_delay_seconds,
+            max_drawdown=self.current_trade_max_drawdown,
+            max_runup=self.current_trade_max_runup,
+            fill_policy_used=self.current_trade_fill_policy,
+            fill_conditions_met=self.current_trade_fill_conditions,
         )
         print(f"DEBUG: Created BacktestTrade with exit_reason: {trade.exit_reason}")
         # Trade is complete - no need to call close()
         
         self.trades.append(trade)
         self.current_position = None
+        
+        # Spec-required: Reset tracking variables
+        self.current_trade_signal_time = None
+        self.current_trade_max_drawdown = Decimal("0")
+        self.current_trade_max_runup = Decimal("0")
+        self.current_trade_fill_policy = None
+        self.current_trade_fill_conditions = None
         
         # Update peak equity
         if self.equity > self.peak_equity:
