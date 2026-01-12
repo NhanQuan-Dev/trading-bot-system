@@ -161,6 +161,10 @@ class BacktestRunResponse(BaseModel):
     max_drawdown: Optional[Decimal] = None
     sharpe_ratio: Optional[Decimal] = None
     
+    # Spec-required: Phase 2-3 config info for frontend display
+    signal_timeframe: Optional[str] = None
+    fill_policy: Optional[str] = None
+    
     created_at: datetime
     config: Dict[str, Any]
     
