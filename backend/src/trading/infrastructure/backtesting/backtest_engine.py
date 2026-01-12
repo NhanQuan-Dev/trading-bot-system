@@ -1096,18 +1096,45 @@ class BacktestEngine:
         return False
     
     def _calculate_position_size(self, price: Decimal) -> Decimal:
-        """Calculate position size based on sizing method."""
+        """Calculate position size based on strategy configuration.
         
-        # Use config position sizing
-        if self.config.position_size_value:
-            capital_to_use = self.equity * self.config.position_size_value
-            # Apply Leverage to purchasing power
-            effective_capital = capital_to_use * Decimal(self.config.leverage)
-            quantity = effective_capital / price
-            return quantity
+        Spec-required: Margin validation to prevent over-leveraging.
+        """
+        if self.config.position_sizing == PositionSizing.FIXED_QUANTITY:
+            quantity = self.config.position_size_value
+        elif self.config.position_sizing == PositionSizing.PERCENT_EQUITY:
+            # Calculate max position value as % of equity
+            max_position_value = self.equity * (self.config.position_size_value / Decimal("100"))
+            quantity = max_position_value / price
+        else:  # RISK_AMOUNT
+            # Risk-based sizing (not fully implemented)
+            max_risk = self.equity * (self.config.position_size_value / Decimal("100"))
+            quantity = max_risk / price
         
-        # Default: use full capital * leverage
-        return (self.equity * Decimal(self.config.leverage)) / price
+        # Spec-required: Margin validation
+        # Ensure position doesn't exceed available capital
+        position_value = quantity * price
+        available_capital = self.equity  # Simplified: could account for existing positions
+        
+        if position_value > available_capital:
+            # Scale down to available capital
+            quantity = available_capital / price
+            logger.warning(f"Position size reduced due to insufficient capital: {quantity}")
+        
+        # Apply leverage if configured
+        if self.config.leverage > 1:
+            quantity = quantity * Decimal(str(self.config.leverage))
+            
+            # Double-check margin after leverage
+            leveraged_value = quantity * price
+            margin_required = leveraged_value / Decimal(str(self.config.leverage))
+            if margin_required > available_capital:
+                # Reduce to max leverage capacity
+                max_quantity = (available_capital * Decimal(str(self.config.leverage))) / price
+                quantity = max_quantity
+                logger.warning(f"Leveraged position capped at available margin: {quantity}")
+        
+        return quantity
     
     def _update_equity_curve(self, timestamp: str, current_price: Decimal) -> None:
         """Update equity curve with current state."""
