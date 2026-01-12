@@ -33,7 +33,7 @@ from ...application.backtesting.schemas import (
 from ...domain.backtesting import BacktestConfig, BacktestRun
 from ...domain.exchange import ExchangeType
 from ...infrastructure.backtesting import BacktestRepository
-from ...infrastructure.persistence.database import get_db
+from ...infrastructure.persistence.database import get_db, get_db_context
 from ...infrastructure.exchange.binance_adapter import BinanceAdapter
 from ...infrastructure.services.market_data_service import MarketDataService
 from ...infrastructure.repositories.exchange_repository import ExchangeRepository
@@ -215,36 +215,15 @@ async def run_backtest(
         
         logger.info(f"Loaded strategy function for ID: {request.strategy_id}")
         
-        # Instantiate dependencies for MarketDataService
-        candle_repo = CandleRepository(repository._session)
-        metadata_repo = MarketMetadataRepository(repository._session)
-        gap_detector = GapDetector()
-        
-        market_data_service = MarketDataService(
-            exchange_adapter=adapter,
-            candle_repository=candle_repo,
-            metadata_repository=metadata_repo,
-            gap_detector=gap_detector
-        )
-        
-        use_case = RunBacktestUseCase(repository, market_data_service)
 
-        
         # Create backtest run entity FIRST (before background task)
-        # Create BacktestRun entity
         backtest_id = uuid.uuid4()
         backtest_run = BacktestRun(
             id=backtest_id,
             user_id=current_user.id,
             strategy_id=request.strategy_id,
             exchange_connection_id=exchange_connection.id,
-            exchange_name=exchange_connection.name, # This might be the connection name, maybe we want just "BINANCE"? 
-            # Domain entity allows exchange_name to be set. 
-            # If we want generic name, we can set it here, but BacktestRunModel might not store it explicitly distinct from relation.
-            # But BacktestRun domain object has it. 
-            # Let's keep connection name for provenance, but config/schema response can show generic if needed?
-            # Schema response has exchange_name.
-            
+            exchange_name=exchange_connection.name, 
             symbol=request.config.symbol,
             timeframe=request.config.timeframe,
             start_date=request.config.start_date,
@@ -253,28 +232,45 @@ async def run_backtest(
         )
 
         await repository.save(backtest_run)
-        backtest_id = backtest_run.id
         
-        # Run in background - use existing backtest_run
+        # Run in background - create NEW session for background task
         async def run_backtest_task():
-            logger.info(f"Task started for backtest {backtest_id}")
-            try:
-                result = await use_case.execute(
-                    user_id=user_id,
-                    strategy_id=request.strategy_id,
-                    config=config,
-                    symbol=request.config.symbol,
-                    timeframe=request.config.timeframe,
-                    start_date=request.config.start_date,
-                    end_date=request.config.end_date,
-                    strategy_func=strategy_func,
-                    backtest_run_id=backtest_id,  # Pass ID to prevent duplicate creation
+            async with get_db_context() as session:
+                logger.info(f"Task started for backtest {backtest_id}")
+                
+                # Re-instantiate dependencies with NEW session
+                task_repo = BacktestRepository(session)
+                task_candle_repo = CandleRepository(session)
+                task_metadata_repo = MarketMetadataRepository(session)
+                task_gap_detector = GapDetector()
+                
+                # Re-use adapter (stateless/managed externally)
+                task_market_data_service = MarketDataService(
+                    exchange_adapter=adapter,
+                    candle_repository=task_candle_repo,
+                    metadata_repository=task_metadata_repo,
+                    gap_detector=task_gap_detector
                 )
-                logger.info(f"Task completed for backtest {backtest_id}")
-            except Exception as e:
-                logger.error(f"Backtest task failed: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                
+                task_use_case = RunBacktestUseCase(task_repo, task_market_data_service)
+                
+                try:
+                    result = await task_use_case.execute(
+                        user_id=user_id,
+                        strategy_id=request.strategy_id,
+                        config=config,
+                        symbol=request.config.symbol,
+                        timeframe=request.config.timeframe,
+                        start_date=request.config.start_date,
+                        end_date=request.config.end_date,
+                        strategy_func=strategy_func,
+                        backtest_run_id=backtest_id,  # Pass ID to prevent duplicate creation
+                    )
+                    logger.info(f"Task completed for backtest {backtest_id}")
+                except Exception as e:
+                    logger.error(f"Backtest task failed: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
         
         
         background_tasks.add_task(run_backtest_task)
