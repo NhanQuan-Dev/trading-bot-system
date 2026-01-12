@@ -61,6 +61,9 @@ interface BacktestItem {
   progress: number;
   statusMessage: string | null; // NEW: User-friendly progress message
   createdAt: string;
+  // Phase 2-3: New config fields
+  signalTimeframe?: string;
+  fillPolicy?: string;
 }
 
 // ... (keep existing statusConfig and shimmerStyle)
@@ -197,7 +200,10 @@ export default function Backtest() {
         status: b.status.toLowerCase(),
         progress: b.progress_percent,
         statusMessage: b.status_message || null, // NEW: Progress message from backend
-        createdAt: b.created_at
+        createdAt: b.created_at,
+        // Phase 2-3: New fields
+        signalTimeframe: b.signal_timeframe || b.config?.signal_timeframe || '1m',
+        fillPolicy: b.fill_policy || b.config?.fill_policy || 'optimistic',
       }));
       console.log('[DEBUG] setBacktests with', mapped.length, 'items');
       setBacktests(mapped);
@@ -409,7 +415,10 @@ export default function Backtest() {
         slippage_percent: formData.get('slippagePercent') ? Number(formData.get('slippagePercent')) : 0.1,
         position_sizing: 'percent_equity',
         position_size_percent: 100,
-        mode: 'event_driven'
+        mode: 'event_driven',
+        // Phase 2-3: New config fields
+        signal_timeframe: formData.get('signal_timeframe') || '1m',
+        fill_policy: formData.get('fill_policy') || 'optimistic',
       }
     };
 
@@ -570,6 +579,37 @@ export default function Backtest() {
                         <SelectItem value="1h">1 Hour</SelectItem>
                         <SelectItem value="4h">4 Hours</SelectItem>
                         <SelectItem value="1d">1 Day</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {/* Phase 2-3: Advanced Config */}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Signal Timeframe</Label>
+                    <Select name="signal_timeframe" defaultValue="1m">
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1m">1m (Standard)</SelectItem>
+                        <SelectItem value="1h">1h (HTF)</SelectItem>
+                        <SelectItem value="4h">4h (HTF)</SelectItem>
+                        <SelectItem value="1d">1d (HTF)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Fill Policy</Label>
+                    <Select name="fill_policy" defaultValue="optimistic">
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="optimistic">Optimistic</SelectItem>
+                        <SelectItem value="neutral">Neutral</SelectItem>
+                        <SelectItem value="strict">Strict</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
