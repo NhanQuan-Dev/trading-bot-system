@@ -148,9 +148,17 @@ class BacktestConfig:
     use_market_open_prices: bool = False
     execution_delay_bars: int = 0
     
-    # Spec-required: Fill policy configuration
+    # Spec-required Phase 1: Fill policy
     fill_policy: str = "optimistic"  # optimistic | neutral | strict
     price_path_assumption: str = "neutral"  # neutral | optimistic | realistic
+    
+    # Spec-required Phase 2: Multi-timeframe
+    data_timeframe: str = "1m"  # Always 1m for spec compliance
+    signal_timeframe: str = "1m"  # HTF for strategy signals (1h, 4h, 1d)
+    
+    # Spec-required Phase 3: Setup-Trigger
+    enable_setup_trigger_model: bool = False
+    setup_validity_window_minutes: int = 60
     
     # Other
     compound_returns: bool = True

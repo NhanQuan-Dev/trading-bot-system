@@ -81,14 +81,34 @@ class BacktestConfigRequest(BaseModel):
         description="Strategy-specific configuration parameters"
     )
     
-    # Spec-required: Fill policy configuration
-    fill_policy: FillPolicy = Field(
-        default=FillPolicy.OPTIMISTIC,
-        description="Fill policy: optimistic/neutral/strict"
+    # Spec-required Phase 1: Fill policy configuration
+    fill_policy: str = Field(
+        default="optimistic",
+        description="Fill policy: optimistic (touch) | neutral (cross) | strict (cross+filter)"
     )
-    price_path_assumption: PricePathAssumption = Field(
-        default=PricePathAssumption.NEUTRAL,
-        description="Price path assumption for TP/SL conflict"
+    price_path_assumption: str = Field(
+        default="neutral",
+        description="TP/SL conflict resolution: neutral (SL first) | optimistic (TP first) | realistic (based on open)"
+    )
+    
+    # Spec-required Phase 2: Multi-timeframe settings
+    data_timeframe: str = Field(
+        default="1m",
+        description="Data source timeframe (always 1m for spec compliance)"
+    )
+    signal_timeframe: str = Field(
+        default="1m",
+        description="Higher timeframe for strategy signals (1m/1h/4h/1d)"
+    )
+    
+    # Spec-required Phase 3: Setup-Trigger model
+    enable_setup_trigger_model: bool = Field(
+        default=False,
+        description="Enable Setup-Trigger state machine for HTF setups"
+    )
+    setup_validity_window_minutes: int = Field(
+        default=60,
+        description="How long a setup remains valid before expiring"
     )
     
     model_config = ConfigDict(use_enum_values=False)
