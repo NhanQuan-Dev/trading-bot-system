@@ -129,28 +129,102 @@ class BacktestEngine:
             backtest_run.start()
         
         try:
-            # Process each candle
-            total_candles = len(candles)
-            
-            for idx, candle in enumerate(candles):
-                self.total_bars_processed += 1
+            # Spec-required: Multi-timeframe processing
+            if self.config.signal_timeframe != "1m":
+                # HTF Signal Mode: Resample 1m → HTF, replay 1m for execution
+                logger.info(f"Multi-timeframe mode: data={self.config.data_timeframe}, signal={self.config.signal_timeframe}")
                 
-                # Process candle
-                self._process_candle(candle, strategy_func, idx)
+                htf_candles = resample_candles_to_htf(candles, self.config.signal_timeframe)
+                total_htf = len(htf_candles)
                 
-                # Update progress (limit frequency to avoid DB spam)
-                # Update approx every 1% or every 100 candles, whichever is larger
-                update_step = max(100, int(total_candles / 100))
+                for htf_idx, htf_candle in enumerate(htf_candles):
+                    # Emit HTF candle closed event
+                    self._emit_event(
+                        BacktestEventType.HTF_CANDLE_CLOSED,
+                        {
+                            "timeframe": self.config.signal_timeframe,
+                            "open": htf_candle["open"],
+                            "high": htf_candle["high"],
+                            "low": htf_candle["low"],
+                            "close": htf_candle["close"],
+                        },
+                        datetime.fromisoformat(htf_candle["timestamp"]) if isinstance(htf_candle["timestamp"], str) else htf_candle["timestamp"],
+                    )
+                    
+                    # Generate HTF signal
+                    htf_signal = strategy_func(htf_candle, htf_idx, self.current_position)
+                    
+                    if htf_signal:
+                        self.signals_generated += 1
+                        logger.debug(f"HTF Signal #{self.signals_generated} at HTF idx={htf_idx}: {htf_signal['type']}")
+                    
+                    # Get 1m candles within this HTF window for execution
+                    htf_timestamp = datetime.fromisoformat(htf_candle["timestamp"]) if isinstance(htf_candle["timestamp"], str) else htf_candle["timestamp"]
+                    window_1m_candles = get_candles_in_htf_window(candles, htf_timestamp, self.config.signal_timeframe)
+                    
+                    # Replay 1m candles for precision execution and TP/SL checks
+                    for m1_candle in window_1m_candles:
+                        self.total_bars_processed += 1
+                        
+                        # Process HTF signal on first 1m candle of window
+                        if htf_signal and m1_candle == window_1m_candles[0]:
+                            self._process_signal(htf_signal, m1_candle)
+                        
+                        # Always check SL/TP and update metrics on every 1m candle
+                        if self.current_position:
+                            current_price = Decimal(str(m1_candle["close"]))
+                            self.current_position.update_unrealized_pnl(current_price)
+                            
+                            # Track max_drawdown/runup
+                            if self.current_position.unrealized_pnl < self.current_trade_max_drawdown:
+                                self.current_trade_max_drawdown = self.current_position.unrealized_pnl
+                            if self.current_position.unrealized_pnl > self.current_trade_max_runup:
+                                self.current_trade_max_runup = self.current_position.unrealized_pnl
+                            
+                            # Check SL/TP
+                            candle_high = Decimal(str(m1_candle.get("high", m1_candle["close"])))
+                            candle_low = Decimal(str(m1_candle.get("low", m1_candle["close"])))
+                            candle_open = Decimal(str(m1_candle.get("open", m1_candle["close"])))
+                            
+                            sl_tp_result = self._check_sl_tp_trailing_with_high_low(candle_high, candle_low, candle_open)
+                            if sl_tp_result:
+                                close_price, reason = sl_tp_result
+                                self._close_position(
+                                    price=close_price,
+                                    timestamp=m1_candle["timestamp"],
+                                    reason=reason,
+                                )
+                        
+                        # Update equity curve
+                        self._update_equity_curve(m1_candle["timestamp"], Decimal(str(m1_candle["close"])))
+                    
+                    # Progress update per HTF candle
+                    if progress_callback and htf_idx % max(1, int(total_htf / 20)) == 0:
+                        percent = int((htf_idx / total_htf) * 100)
+                        backtest_run.update_progress(percent)
+                        await progress_callback(percent)
                 
-                if progress_callback and idx % update_step == 0:
-                    percent = int((idx / total_candles) * 100)
-                    backtest_run.update_progress(percent)
-                    await progress_callback(percent)
+            else:
+                # Standard 1m processing (original logic)
+                total_candles = len(candles)
                 
-                # Log every 50 candles
-                # Log every 50 candles
-                if idx % 50 == 0:
-                    logger.debug(f"Progress: {idx}/{total_candles} candles | Signals: {self.signals_generated} | Trades: {len(self.trades)}")
+                for idx, candle in enumerate(candles):
+                    self.total_bars_processed += 1
+                    
+                    # Process candle
+                    self._process_candle(candle, strategy_func, idx)
+                    
+                    # Update progress
+                    update_step = max(100, int(total_candles / 100))
+                    
+                    if progress_callback and idx % update_step == 0:
+                        percent = int((idx / total_candles) * 100)
+                        backtest_run.update_progress(percent)
+                        await progress_callback(percent)
+                    
+                    # Log every 50 candles
+                    if idx % 50 == 0:
+                        logger.debug(f"Progress: {idx}/{total_candles} candles | Signals: {self.signals_generated} | Trades: {len(self.trades)}")
             
             # Close any open position
             if self.current_position:
