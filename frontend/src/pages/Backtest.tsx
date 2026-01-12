@@ -931,7 +931,7 @@ export default function Backtest() {
                         <TableCell>
                           <div>
                             <p className="font-medium text-foreground">{backtest.strategy}</p>
-                            <p className="text-xs text-muted-foreground">{backtest.timeframe}</p>
+                            <p className="text-xs text-muted-foreground">{backtest.signalTimeframe || backtest.timeframe}</p>
                           </div>
                         </TableCell>
                         <TableCell className="font-mono text-sm">{backtest.symbol}</TableCell>
