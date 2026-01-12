@@ -22,6 +22,7 @@ from ...domain.backtesting import (
 )
 from .metrics_calculator import MetricsCalculator
 from .market_simulator import MarketSimulator
+from .timeframe_utils import resample_candles_to_htf, get_candles_in_htf_window
 
 logger = logging.getLogger(__name__)
 
