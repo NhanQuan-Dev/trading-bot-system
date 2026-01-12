@@ -618,6 +618,7 @@ class BacktestEngine:
             max_runup=self.current_trade_max_runup,
             fill_policy_used=self.current_trade_fill_policy,
             fill_conditions_met=self.current_trade_fill_conditions,
+        )
         print(f"DEBUG: Created BacktestTrade with exit_reason: {trade.exit_reason}")
         # Trade is complete - no need to call close()
         

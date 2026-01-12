@@ -92,10 +92,7 @@ class BacktestConfigRequest(BaseModel):
     )
     
     # Spec-required Phase 2: Multi-timeframe settings
-    data_timeframe: str = Field(
-        default="1m",
-        description="Data source timeframe (always 1m for spec compliance)"
-    )
+    # Spec-required Phase 2: data_timeframe is always 1m (hardcoded), only signal_timeframe is configurable
     signal_timeframe: str = Field(
         default="1m",
         description="Higher timeframe for strategy signals (1m/1h/4h/1d)"

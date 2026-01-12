@@ -566,21 +566,9 @@ export default function Backtest() {
                     <Input name="symbol" defaultValue="BTC/USDT" placeholder="e.g. BTC/USDT" required />
                   </div>
                   <div className="space-y-2">
-                    <Label>Timeframe</Label>
-                    <Select name="timeframe" defaultValue="1h">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1m">1 Minute</SelectItem>
-                        <SelectItem value="5m">5 Minutes</SelectItem>
-                        <SelectItem value="15m">15 Minutes</SelectItem>
-                        <SelectItem value="30m">30 Minutes</SelectItem>
-                        <SelectItem value="1h">1 Hour</SelectItem>
-                        <SelectItem value="4h">4 Hours</SelectItem>
-                        <SelectItem value="1d">1 Day</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label>Data Resolution</Label>
+                    <Input value="1m (Fixed)" disabled className="bg-muted" />
+                    <input type="hidden" name="timeframe" value="1m" />
                   </div>
                 </div>
 
