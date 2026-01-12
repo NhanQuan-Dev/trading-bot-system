@@ -24,6 +24,10 @@ from .enums import (
     FillPolicy,
     PricePathAssumption,
 )
+from .events import (
+    BacktestEventType,
+    BacktestEvent,
+)
 from .repositories import IBacktestRepository
 
 __all__ = [
@@ -48,6 +52,9 @@ __all__ = [
     "TradeDirection",
     "FillPolicy",
     "PricePathAssumption",
+    # Events
+    "BacktestEventType",
+    "BacktestEvent",
     # Repositories
     "IBacktestRepository",
 ]

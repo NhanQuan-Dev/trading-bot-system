@@ -4,6 +4,7 @@ import logging
 from decimal import Decimal
 from typing import List, Dict, Optional, Callable, Union, Any
 from datetime import datetime
+from uuid import UUID
 
 from ...domain.backtesting import (
     BacktestRun,
@@ -16,6 +17,8 @@ from ...domain.backtesting import (
     TradeDirection,
     EquityCurvePoint,
     PerformanceMetrics,
+    BacktestEventType,
+    BacktestEvent,
 )
 from .metrics_calculator import MetricsCalculator
 from .market_simulator import MarketSimulator
@@ -56,6 +59,10 @@ class BacktestEngine:
         self.current_trade_max_runup: Decimal = Decimal("0")
         self.current_trade_fill_policy: Optional[str] = None
         self.current_trade_fill_conditions: Optional[dict] = None
+        
+        # Spec-required Phase 2: Event tracking
+        self.events: List[BacktestEvent] = []
+        self.backtest_run_id: Optional[UUID] = None  # Set when backtest starts
         
         # Stats
         self.equity_curve: List[EquityCurvePoint] = []
