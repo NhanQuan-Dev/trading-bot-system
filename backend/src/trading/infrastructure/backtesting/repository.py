@@ -18,7 +18,8 @@ from ...domain.backtesting import (
 from ..persistence.models.backtest_models import (
     BacktestRunModel, 
     BacktestResultModel, 
-    BacktestTradeModel
+    BacktestTradeModel,
+    BacktestEventModel
 )
 
 logger = logging.getLogger(__name__)
@@ -281,15 +282,33 @@ class BacktestRepository(IBacktestRepository):
                 exit_time=trade.exit_time or trade.entry_time,
                 gross_pnl=trade.gross_pnl,
                 commission=trade.entry_commission + trade.exit_commission,
+                maker_fee=getattr(trade, 'maker_fee', Decimal("0")),
+                taker_fee=getattr(trade, 'taker_fee', Decimal("0")),
+                funding_fee=getattr(trade, 'funding_fee', Decimal("0")),
                 slippage=trade.entry_slippage + trade.exit_slippage,
                 net_pnl=trade.net_pnl,
                 pnl_percent=trade.pnl_percent,
+                mae=getattr(trade, 'mae', None),
+                mfe=getattr(trade, 'mfe', None),
                 entry_reason=_convert_decimals(trade.entry_reason),
-                exit_reason=_convert_decimals(trade.exit_reason)
+                exit_reason=_convert_decimals(trade.exit_reason),
+                initial_entry_price=getattr(trade, 'initial_entry_price', None),
+                initial_entry_quantity=getattr(trade, 'initial_entry_quantity', None)
             )
             if trade.entry_reason:
                  print(f"DEBUG REPO: Saving trade {trade.id} with entry_reason: {trade.entry_reason}")
             self._session.add(trade_model)
+            
+        # Save events
+        for event in results.events:
+            event_model = BacktestEventModel(
+                backtest_id=backtest.id,
+                trade_id=event.trade_id,
+                event_type=event.event_type.value if hasattr(event.event_type, 'value') else str(event.event_type),
+                timestamp=event.timestamp,
+                details=_convert_decimals(event.details)
+            )
+            self._session.add(event_model)
     
     async def get_by_id(self, backtest_id: UUID) -> Optional[BacktestRun]:
         """Get backtest by ID."""
@@ -429,6 +448,10 @@ class BacktestRepository(IBacktestRepository):
             "risk_of_ruin": model.risk_of_ruin,
         }
         
+        if model.trades:
+            # Removed debug logging
+            pass
+
         return {
             "initial_capital": model.initial_capital,
             "final_equity": model.final_equity,
@@ -737,4 +760,28 @@ class BacktestRepository(IBacktestRepository):
                 
                 position_timeline.append(exit_point)
         
+        
         return sorted(position_timeline, key=lambda p: p.timestamp)
+
+    async def get_backtest_events(
+        self,
+        backtest_id: UUID,
+        trade_id: Optional[UUID] = None,
+        event_types: Optional[List[str]] = None,
+    ) -> List[BacktestEventModel]:
+        """Get events for a backtest, optionally filtered by trade."""
+        
+        query = select(BacktestEventModel).where(
+            BacktestEventModel.backtest_id == backtest_id
+        )
+        
+        if trade_id:
+            query = query.where(BacktestEventModel.trade_id == trade_id)
+            
+        if event_types:
+            query = query.where(BacktestEventModel.event_type.in_(event_types))
+            
+        query = query.order_by(BacktestEventModel.timestamp.asc())
+        
+        result = await self._session.execute(query)
+        return result.scalars().all()

@@ -105,7 +105,13 @@ class BacktestStrategyAdapter:
         try:
             # Execute Code
             exec(code, namespace)
+            exec(code, namespace)
             logger.info(f"[DynamicLoader] Code executed successfully. Namespace keys: {list(namespace.keys())}")
+            
+            # DEBUG: Print types of all objects in namespace
+            for k, v in namespace.items():
+                if not k.startswith("__"):
+                    logger.info(f"DEBUG_NS: {k} -> Type: {type(v)} | Base: {v.__base__ if isinstance(v, type) else 'N/A'}")
         except Exception as exec_err:
             logger.error(f"[DynamicLoader] exec() failed: {exec_err}")
             logger.error(f"[DynamicLoader] Traceback: {traceback.format_exc()}")
@@ -114,8 +120,21 @@ class BacktestStrategyAdapter:
         # Find Strategy Class
         target_cls = None
         for name, obj in namespace.items():
-            if isinstance(obj, type) and issubclass(obj, StrategyBase) and obj is not StrategyBase:
-                logger.info(f"[DynamicLoader] Found strategy class: {name}")
+            # Check 1: Strict Subclass (if inheritance worked)
+            is_valid = False
+            # Fix: Explicitly skip StrategyBase by name to avoid Abstract Class Instantiation error
+            if isinstance(obj, type) and name != "StrategyBase" and obj is not StrategyBase:
+                if issubclass(obj, StrategyBase):
+                    is_valid = True
+                # Check 2: Name Heuristic (if inheritance failed due to reload/import issues)
+                # Matches "MartingaleSmartMTF" or anything ending in "Strategy"
+                elif "Strategy" in name or name == "MartingaleSmartMTF":
+                    # Verify it has required methods
+                    if hasattr(obj, 'on_tick') or hasattr(obj, 'calculate_signal'):
+                        is_valid = True
+            
+            if is_valid:
+                logger.info(f"[/DynamicLoader] Found strategy class: {name}")
                 target_cls = obj
                 break
                 
@@ -139,9 +158,50 @@ class BacktestStrategyAdapter:
             # Default generic strategy
             self.min_history = 20
     
-    def generate_signal(self, candle: Dict, idx: int, position: Optional[Dict]) -> Optional[Dict]:
-        """Generate trading signal."""
-        # Add candle to history
+    @property
+    def timeframe_mode(self) -> str:
+        if self.strategy_instance:
+            return getattr(self.strategy_instance, 'timeframe_mode', 'single')
+        return 'single'
+
+    @property
+    def required_timeframes(self) -> List[str]:
+        if self.strategy_instance:
+            return getattr(self.strategy_instance, 'required_timeframes', [])
+        return []
+
+    def pre_calculate(self, candles: List[Dict[str, Any]], htf_candles: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+        """Proxy pre_calculate call to the underlying strategy instance."""
+        if self.strategy_instance and hasattr(self.strategy_instance, 'pre_calculate'):
+            try:
+                # Use inspection to handle different method signatures
+                import inspect
+                sig = inspect.signature(self.strategy_instance.pre_calculate)
+                
+                if 'htf_candles' in sig.parameters:
+                    self.strategy_instance.pre_calculate(candles, htf_candles=htf_candles)
+                else:
+                    self.strategy_instance.pre_calculate(candles)
+                
+                logger.debug(f"Pre-calculation completed for strategy: {self.strategy_name}")
+            except Exception as e:
+                logger.error(f"Error in strategy pre_calculate: {e}")
+
+    def __call__(self, *args, **kwargs) -> Optional[Dict]:
+        """Allow the adapter itself to be called like a function."""
+        return self.generate_signal(*args, **kwargs)
+
+    def generate_signal(self, candle: Dict, idx: int, position: Optional[Dict], multi_tf_context: Optional[Any] = None) -> Optional[Dict]:
+        """
+        Generate trading signal.
+        
+        Args:
+            candle: Current candle (execution timeframe)
+            idx: Index in the execution timeframe
+            position: Current position
+            multi_tf_context: Optional MultiTimeframeContext for 'multi' strategies
+        """
+        # Add candle to history (Note: No longer capped, but only used if strategy uses it)
         self.history.append({
             "open": float(candle.get("open", 0)),
             "high": float(candle.get("high", 0)),
@@ -151,12 +211,10 @@ class BacktestStrategyAdapter:
             "timestamp": candle.get("timestamp")
         })
         
-        # Limit history size
-        if len(self.history) > 200:
-            self.history.pop(0)
-        
         # Use Dynamic Strategy Logic if available
         if self.strategy_instance and hasattr(self.strategy_instance, 'calculate_signal'):
+             if self.timeframe_mode == 'multi' and multi_tf_context:
+                 return self.strategy_instance.calculate_signal(candle, idx, position, multi_tf_context=multi_tf_context)
              return self.strategy_instance.calculate_signal(candle, idx, position)
 
         # Legacy Hardcoded Logic Fallbacks
@@ -365,4 +423,4 @@ def get_strategy_function(strategy_id: str, strategy_name: str = None, config: D
     
     adapter = BacktestStrategyAdapter(result_strategy_name, config, code_content)
     
-    return adapter.generate_signal
+    return adapter

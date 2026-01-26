@@ -4,11 +4,12 @@ import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Download, TrendingDown, Calendar, DollarSign, Activity, BarChart2, Hash, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Download, TrendingDown, Calendar, DollarSign, Activity, BarChart2, Hash, ChevronDown, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 import { PositionLogTable } from '@/components/backtest/PositionLogTable';
 import { apiClient } from '@/lib/api/client';
@@ -32,7 +33,9 @@ interface BacktestResult {
   status: string;
   created_at: string;
   strategy_name?: string;
+  signal_timeframe?: string;
   error_message?: string;
+  leverage?: number;
 }
 
 interface Trade {
@@ -47,7 +50,15 @@ interface Trade {
   pnl: number;
   pnl_percent: number;
   status: string;
+  mae?: number;
+  mfe?: number;
+  maker_fee?: number;
+  taker_fee?: number;
+  funding_fee?: number;
   entry_reason?: Record<string, any>;
+  exit_reason?: Record<string, any>;
+  initial_entry_price?: number;
+  initial_entry_quantity?: number;
 }
 
 export default function BacktestDetail() {
@@ -151,10 +162,17 @@ export default function BacktestDetail() {
               exit_price: t.exit_price,
               quantity: t.quantity,
               pnl: t.pnl || 0,
-              pnl_percent: t.pnl_pct || 0,
+              pnl_percent: t.pnl_percent || 0,
+              mae: t.mae,
+              mfe: t.mfe,
+              maker_fee: t.maker_fee || 0,
+              taker_fee: t.taker_fee || 0,
+              funding_fee: t.funding_fee || 0,
               status: t.pnl > 0 ? 'WIN' : t.pnl < 0 ? 'LOSS' : 'BREAK_EVEN',
               entry_reason: t.entry_reason,
               exit_reason: t.exit_reason,
+              initial_entry_price: t.initial_entry_price,
+              initial_entry_quantity: t.initial_entry_quantity,
             })));
           }
         } catch (e) { console.error("Trades fetch error", e); }
@@ -234,7 +252,14 @@ export default function BacktestDetail() {
               <h2 className="text-2xl font-bold tracking-tight">{strategyName}</h2>
               <div className="flex items-center text-sm text-muted-foreground">
                 <Badge variant="outline" className="mr-2">{backtest.symbol}</Badge>
-                <Badge variant="outline" className="mr-2">{backtest.timeframe}</Badge>
+                <Badge variant="outline" className="mr-2">
+                  {backtest.signal_timeframe || backtest.timeframe}
+                </Badge>
+                {backtest.leverage && (
+                  <Badge variant="outline" className="mr-2 text-blue-500 border-blue-500/20">
+                    {backtest.leverage}x Leverage
+                  </Badge>
+                )}
                 <Calendar className="mr-1 h-3 w-3" />
                 {new Date(backtest.start_date).toLocaleDateString()} - {new Date(backtest.end_date).toLocaleDateString()}
                 <Badge
@@ -270,8 +295,21 @@ export default function BacktestDetail() {
                 <div className={cn("text-2xl font-bold", Number(backtest.total_return || 0) >= 0 ? "text-green-500" : "text-red-500")}>
                   {Number(backtest.total_return || 0) >= 0 ? '+' : ''}${Number(backtest.final_equity ? Number(backtest.final_equity) - Number(backtest.initial_capital) : 0).toFixed(2)}
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {Number(backtest.total_return || 0) >= 0 ? '+' : ''}{Number(backtest.total_return || 0).toFixed(2)}% Return
+                <p className="text-xs text-muted-foreground flex items-center gap-1">
+                  {Number(backtest.total_return || 0) >= 0 ? '+' : ''}{Number(backtest.total_return || 0).toFixed(2)}% ROI
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Info className="h-3 w-3 cursor-help text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="text-xs">
+                          ROI is calculated as "Return on Margin" (Leveraged).<br />
+                          Formula: (Net PnL / (Quantity * Entry Price / Leverage)) * 100
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </p>
               </CardContent>
               <CollapsibleContent>
@@ -403,10 +441,11 @@ export default function BacktestDetail() {
           </TabsList>
 
           <TabsContent value="position-log" forceMount className={cn("space-y-4", activeTab !== 'position-log' && 'hidden')}>
-            <PositionLogTable trades={trades} />
+            <PositionLogTable trades={trades} backtestId={id!} />
           </TabsContent>
         </Tabs>
       </div>
+
     </DashboardLayout>
   );
 }

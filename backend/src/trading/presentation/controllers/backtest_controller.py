@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import csv
 import io
 import os
+import asyncio
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
 from ...application.backtesting import (
@@ -59,6 +62,89 @@ async def get_backtest_repository(
 def get_current_user_id(user: User = Depends(get_current_active_user)) -> UUID:
     """Get current user ID from auth."""
     return user.id
+
+
+# === ProcessPoolExecutor for CPU-bound backtests ===
+# This allows running backtest simulations in separate processes,
+# preventing them from blocking the main asyncio event loop.
+_backtest_executor: ProcessPoolExecutor | None = None
+
+
+def get_backtest_executor() -> ProcessPoolExecutor:
+    """Get or create the global backtest executor."""
+    global _backtest_executor
+    if _backtest_executor is None:
+        # Leave 2 cores for the API server
+        max_workers = max(1, multiprocessing.cpu_count() - 2)
+        logger.info(f"Initializing BacktestExecutor with {max_workers} workers")
+        _backtest_executor = ProcessPoolExecutor(max_workers=max_workers)
+    return _backtest_executor
+
+
+async def run_backtest_in_executor(backtest_id: UUID, user_id: UUID, strategy_id: UUID, 
+                                    config_dict: dict, symbol: str, timeframe: str,
+                                    start_date: datetime, end_date: datetime,
+                                    strategy_name: str, strategy_code: str | None,
+                                    exchange_type: str, is_testnet: bool):
+    """
+    Run backtest execution in a separate process via ProcessPoolExecutor.
+    This function is called from the background task and handles all the heavy work.
+    """
+    # Import here to avoid circular imports and ensure fresh module state per process
+    async with get_db_context() as session:
+        logger.info(f"Executor task started for backtest {backtest_id}")
+        
+        # Re-instantiate dependencies with NEW session
+        task_repo = BacktestRepository(session)
+        task_candle_repo = CandleRepository(session)
+        task_metadata_repo = MarketMetadataRepository(session)
+        task_gap_detector = GapDetector()
+        
+        # Create appropriate adapter
+        if exchange_type == "BINANCE":
+            adapter = BinanceAdapter(api_key="", api_secret="", testnet=False)
+        else:
+            logger.error(f"Unsupported exchange type: {exchange_type}")
+            return
+        
+        task_market_data_service = MarketDataService(
+            exchange_adapter=adapter,
+            candle_repository=task_candle_repo,
+            metadata_repository=task_metadata_repo,
+            gap_detector=task_gap_detector
+        )
+        
+        task_use_case = RunBacktestUseCase(task_repo, task_market_data_service)
+        
+        # Load strategy function
+        from ...strategies.backtest_adapter import get_strategy_function
+        strategy_func = get_strategy_function(
+            strategy_id=str(strategy_id),
+            strategy_name=strategy_name,
+            config=config_dict,
+            code_content=strategy_code
+        )
+        
+        # Reconstruct config from dict
+        config = BacktestConfig(**config_dict)
+        
+        try:
+            result = await task_use_case.execute(
+                user_id=user_id,
+                strategy_id=strategy_id,
+                config=config,
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                strategy_func=strategy_func,
+                backtest_run_id=backtest_id,
+            )
+            logger.info(f"Executor task completed for backtest {backtest_id}")
+        except Exception as e:
+            logger.error(f"Backtest task failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
 
@@ -173,12 +259,19 @@ async def run_backtest(
             
             # Phase 1-3 New Fields
             fill_policy=request.config.fill_policy,
+            market_fill_policy=request.config.market_fill_policy,
+            limit_fill_policy=request.config.limit_fill_policy,
             price_path_assumption=request.config.price_path_assumption,
             signal_timeframe=request.config.signal_timeframe,
+            execution_delay_bars=request.config.execution_delay_bars,
             enable_setup_trigger_model=request.config.enable_setup_trigger_model,
             setup_validity_window_minutes=request.config.setup_validity_window_minutes,
+            
+            # Phase 2: Condition Timeframes
+            condition_timeframes=request.config.condition_timeframes,
         )
-        logger.info(f"DEBUG CONTROLLER: Created Config - Leverage: {config.leverage}, Taker: {config.taker_fee_rate}, Maker: {config.maker_fee_rate}, Funding: {config.funding_rate_daily}")
+        logger.info(f"DEBUG CONTROLLER: Created Config - Leverage: {config.leverage}, Taker: {config.taker_fee_rate}, Maker: {config.maker_fee_rate}")
+        logger.info(f"DEBUG CONTROLLER: Policies - Market: {config.market_fill_policy}, Limit: {config.limit_fill_policy}, Assumption: {config.price_path_assumption}")
         
         # Fetch Strategy Name from DB
         from ...infrastructure.persistence.models.bot_models import StrategyModel
@@ -209,7 +302,7 @@ async def run_backtest(
         strategy_func = get_strategy_function(
             strategy_id=str(request.strategy_id),
             strategy_name=strategy_implementation_name,
-            config=strategy_config,
+            config={**strategy_config, "leverage": config.leverage},
             code_content=strategy_code
         )
         
@@ -233,47 +326,28 @@ async def run_backtest(
 
         await repository.save(backtest_run)
         
-        # Run in background - create NEW session for background task
-        async def run_backtest_task():
-            async with get_db_context() as session:
-                logger.info(f"Task started for backtest {backtest_id}")
-                
-                # Re-instantiate dependencies with NEW session
-                task_repo = BacktestRepository(session)
-                task_candle_repo = CandleRepository(session)
-                task_metadata_repo = MarketMetadataRepository(session)
-                task_gap_detector = GapDetector()
-                
-                # Re-use adapter (stateless/managed externally)
-                task_market_data_service = MarketDataService(
-                    exchange_adapter=adapter,
-                    candle_repository=task_candle_repo,
-                    metadata_repository=task_metadata_repo,
-                    gap_detector=task_gap_detector
-                )
-                
-                task_use_case = RunBacktestUseCase(task_repo, task_market_data_service)
-                
-                try:
-                    result = await task_use_case.execute(
-                        user_id=user_id,
-                        strategy_id=request.strategy_id,
-                        config=config,
-                        symbol=request.config.symbol,
-                        timeframe=request.config.timeframe,
-                        start_date=request.config.start_date,
-                        end_date=request.config.end_date,
-                        strategy_func=strategy_func,
-                        backtest_run_id=backtest_id,  # Pass ID to prevent duplicate creation
-                    )
-                    logger.info(f"Task completed for backtest {backtest_id}")
-                except Exception as e:
-                    logger.error(f"Backtest task failed: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+        # Run backtest asynchronously using create_task
+        # This is decoupled from the request lifecycle and runs in the background
+        # The run_backtest_in_executor function handles its own DB session
+        from dataclasses import asdict
+        config_dict = asdict(config)
         
-        
-        background_tasks.add_task(run_backtest_task)
+        asyncio.create_task(
+            run_backtest_in_executor(
+                backtest_id=backtest_id,
+                user_id=user_id,
+                strategy_id=request.strategy_id,
+                config_dict=config_dict,
+                symbol=request.config.symbol,
+                timeframe=request.config.timeframe,
+                start_date=request.config.start_date,
+                end_date=request.config.end_date,
+                strategy_name=strategy_name_db,
+                strategy_code=strategy_code,
+                exchange_type=str(exchange_connection.exchange_type.value),
+                is_testnet=exchange_connection.is_testnet,
+            )
+        )
         
         # Return the backtest_run that was already created
         return BacktestRunResponse.model_validate(backtest_run)
@@ -507,12 +581,7 @@ async def get_backtest_trades(
         )
         
         # Verify exit reason data
-        if trades and trades[0].exit_reason:
-             print(f"DEBUG API PRINT: Sending {len(trades)} trades. Sample exit_reason: {trades[0].exit_reason}")
-             logger.info(f"DEBUG API: Sending {len(trades)} trades. Sample exit_reason: {trades[0].exit_reason}")
-        elif trades:
-             print(f"DEBUG API PRINT: Sending {len(trades)} trades. First trade exit_reason is NONE/EMPTY.")
-             logger.warning(f"DEBUG API: Sending {len(trades)} trades. First trade exit_reason is NONE/EMPTY.")
+        pass
 
         return {
             "trades": [
@@ -524,12 +593,20 @@ async def get_backtest_trades(
                     "exit_price": float(trade.exit_price) if trade.exit_price else None,
                     "quantity": float(trade.quantity),
                     "pnl": float(trade.net_pnl) if trade.net_pnl is not None else None,
-                    "pnl_pct": float(trade.pnl_percent) if trade.pnl_percent is not None else None,
+                    "pnl_percent": float(trade.pnl_percent) if trade.pnl_percent is not None else None,
+                    "pnl_pct": float(trade.pnl_percent) if trade.pnl_percent is not None else None, # Legacy support
+                    "mae": float(trade.mae) if trade.mae is not None else None,
+                    "mfe": float(trade.mfe) if trade.mfe is not None else None,
+                    "maker_fee": float(trade.maker_fee) if getattr(trade, "maker_fee", None) is not None else 0.0,
+                    "taker_fee": float(trade.taker_fee) if getattr(trade, "taker_fee", None) is not None else 0.0,
+                    "funding_fee": float(trade.funding_fee) if getattr(trade, "funding_fee", None) is not None else 0.0,
                     "duration": trade.duration_seconds if hasattr(trade, 'duration_seconds') else None,
                     "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
                     "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
                     "entry_reason": trade.entry_reason,
                     "exit_reason": trade.exit_reason,
+                    "initial_entry_price": float(trade.initial_entry_price) if getattr(trade, "initial_entry_price", None) is not None else None,
+                    "initial_entry_quantity": float(trade.initial_entry_quantity) if getattr(trade, "initial_entry_quantity", None) is not None else None,
                 }
                 for trade in trades
             ],
@@ -658,7 +735,7 @@ async def export_backtest_csv(
             # Create CSV headers
             headers = [
                 "Date", "Symbol", "Side", "Entry Price", "Exit Price",
-                "Quantity", "P&L", "P&L%", "Duration (mins)", "Entry Time", "Exit Time"
+                "Quantity", "MAE%", "MFE%", "P&L", "P&L%", "Duration (mins)", "Entry Time", "Exit Time"
             ]
             
             # Create in-memory CSV
@@ -690,17 +767,19 @@ async def export_backtest_csv(
                         duration_mins = duration.total_seconds() / 60
                     
                     row = [
-                        trade.created_at.strftime('%Y-%m-%d'),
+                        trade.entry_time.isoformat(),
                         trade.symbol,
-                        trade.side,
+                        trade.direction.value,
                         float(trade.entry_price),
-                        float(trade.exit_price) if trade.exit_price else '',
+                        float(trade.exit_price) if trade.exit_price else "",
                         float(trade.quantity),
-                        float(trade.pnl) if trade.pnl else '',
-                        f"{float(trade.pnl_pct):.2f}%" if trade.pnl_pct else '',
-                        f"{duration_mins:.1f}" if duration_mins else '',
-                        trade.entry_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(trade, 'entry_time') else '',
-                        trade.exit_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(trade, 'exit_time') and trade.exit_time else ''
+                        float(trade.mae) if trade.mae is not None else 0.0,
+                        float(trade.mfe) if trade.mfe is not None else 0.0,
+                        float(trade.net_pnl) if trade.net_pnl is not None else 0.0,
+                        float(trade.pnl_percent) if trade.pnl_percent is not None else 0.0,
+                        trade.duration_seconds // 60 if hasattr(trade, 'duration_seconds') and trade.duration_seconds else 0,
+                        trade.entry_time.isoformat(),
+                        trade.exit_time.isoformat() if trade.exit_time else ""
                     ]
                     
                     writer.writerow(row)
@@ -722,6 +801,54 @@ async def export_backtest_csv(
         
     except Exception as e:
         logger.error(f"Failed to export backtest CSV: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{backtest_id}/events")
+async def get_backtest_events(
+    backtest_id: UUID,
+    trade_id: Optional[UUID] = Query(None, description="Filter by trade ID"),
+    event_types: Optional[List[str]] = Query(None, description="Filter by event types"),
+    user_id: UUID = Depends(get_current_user_id),
+    repository: BacktestRepository = Depends(get_backtest_repository),
+):
+    """
+    Get significant events that occurred during a backtest.
+    
+    Returns a sequence of events (entry, exits, updates, scale-ins) for 
+    the whole backtest or a specific trade.
+    """
+    
+    # Verify backtest exists and ownership
+    use_case = GetBacktestUseCase(repository)
+    backtest_run = await use_case.execute(backtest_id)
+    
+    if not backtest_run:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    
+    if backtest_run.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    try:
+        events = await repository.get_backtest_events(
+            backtest_id=backtest_id,
+            trade_id=trade_id,
+            event_types=event_types
+        )
+        
+        return [
+            {
+                "id": str(e.id),
+                "timestamp": e.timestamp.isoformat(),
+                "event_type": e.event_type,
+                "details": e.details,
+                "trade_id": str(e.trade_id) if e.trade_id else None
+            }
+            for e in events
+        ]
+        
+    except Exception as e:
+        logger.error(f"Failed to get backtest events: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

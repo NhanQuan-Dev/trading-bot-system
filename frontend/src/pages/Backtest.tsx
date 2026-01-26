@@ -9,7 +9,12 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
-import { Play, Pause, Square, Eye, TrendingUp, TrendingDown, Target, Activity, Clock, Plus, AlertCircle, Search, Trash2, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { Play, Pause, Square, Eye, TrendingUp, TrendingDown, Target, Activity, Clock, Plus, AlertCircle, Search, Trash2, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, HelpCircle, Settings2 } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Table,
@@ -19,6 +24,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -31,7 +42,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 
 type BacktestStatus = 'running' | 'paused' | 'completed' | 'error' | 'pending';
-type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'status' | 'createdAt' | 'totalTrades' | 'maxDrawdown' | 'initialCapital' | 'leverage' | 'fundingRate' | 'makerFee' | 'takerFee' | 'slippagePercent' | 'exchange';
+type SortField = 'strategy' | 'symbol' | 'netProfit' | 'winRate' | 'status' | 'createdAt' | 'totalTrades' | 'maxDrawdown' | 'initialCapital' | 'leverage' | 'fundingRate' | 'makerFee' | 'takerFee' | 'slippagePercent' | 'exchange' | 'marketFillPolicy' | 'limitFillPolicy' | 'pricePathAssumption';
 type SortDirection = 'asc' | 'desc';
 
 interface BacktestItem {
@@ -63,7 +74,9 @@ interface BacktestItem {
   createdAt: string;
   // Phase 2-3: New config fields
   signalTimeframe?: string;
-  fillPolicy?: string;
+  marketFillPolicy?: string;
+  limitFillPolicy?: string;
+  pricePathAssumption?: string;
 }
 
 // ... (keep existing statusConfig and shimmerStyle)
@@ -96,7 +109,7 @@ export default function Backtest() {
 
   const [backtests, setBacktests] = useState<BacktestItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [strategies, setStrategies] = useState<{ id: string; name: string; }[]>([]);
+  const [strategies, setStrategies] = useState<{ id: string; name: string; required_timeframes?: string[] }[]>([]);
   const [exchanges, setExchanges] = useState<string[]>([]);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -111,6 +124,25 @@ export default function Backtest() {
   // Phase 2-3: Form state for Radix Select components (they don't sync with formData)
   const [formSignalTimeframe, setFormSignalTimeframe] = useState('1m');
   const [formFillPolicy, setFormFillPolicy] = useState('optimistic');
+  const [formMarketFillPolicy, setFormMarketFillPolicy] = useState('close');
+  const [formLimitFillPolicy, setFormLimitFillPolicy] = useState('cross');
+  const [formPricePathAssumption, setFormPricePathAssumption] = useState('neutral');
+  const [formStrategyId, setFormStrategyId] = useState<string>('');
+  const [formExchangeName, setFormExchangeName] = useState('');
+  const [formSymbol, setFormSymbol] = useState('BTC/USDT');
+  const [formInitialCapital, setFormInitialCapital] = useState('10000');
+  const [formStartDate, setFormStartDate] = useState('2024-01-01');
+  const [formEndDate, setFormEndDate] = useState('2024-12-31');
+  const [formLeverage, setFormLeverage] = useState('20');
+  const [formExecutionDelayBars, setFormExecutionDelayBars] = useState('0');
+  const [formSlippagePercent, setFormSlippagePercent] = useState('0.1');
+  const [formTakerFee, setFormTakerFee] = useState('0.04');
+
+  const [formMakerFee, setFormMakerFee] = useState('0.02');
+  const [formFundingRate, setFormFundingRate] = useState('0.03');
+  // Phase 2: Condition Timeframes
+  const [formConditionTimeframes, setFormConditionTimeframes] = useState<string[]>([]);
+  const [showAdvancedColumns, setShowAdvancedColumns] = useState(false);
   const itemsPerPage = 10;
 
   // Strategy ID mapping - synced with backend seed_strategies.py
@@ -144,8 +176,38 @@ export default function Backtest() {
     if (isCreateOpen) {
       setFormSignalTimeframe('1m');
       setFormFillPolicy('optimistic');
+      setFormMarketFillPolicy('close');
+      setFormLimitFillPolicy('cross');
+      setFormPricePathAssumption('neutral');
+      setFormExchangeName(exchanges[0] || '');
+      setFormSymbol('BTC/USDT');
+      setFormInitialCapital('10000');
+      setFormStartDate('2024-01-01');
+      setFormEndDate('2024-12-31');
+      setFormLeverage('20');
+      setFormExecutionDelayBars('0');
+      setFormSlippagePercent('0.1');
+      setFormTakerFee('0.04');
+      setFormMakerFee('0.02');
+      setFormFundingRate('0.03');
+      setFormConditionTimeframes([]);
     }
   }, [isCreateOpen]);
+
+  // Handle Strategy Selection Changes
+  // Also re-run when dialog opens (isCreateOpen) to handle re-opening with same strategy selected
+  useEffect(() => {
+    if (!isCreateOpen) return; // Only run when dialog is open
+
+    const selectedStrategy = strategies.find(s => s.id === formStrategyId);
+    if (selectedStrategy?.required_timeframes && selectedStrategy.required_timeframes.length > 0) {
+      // Multi-Timeframe: Auto-select required TFs
+      setFormConditionTimeframes(selectedStrategy.required_timeframes);
+    } else {
+      // Single Timeframe: Reset
+      setFormConditionTimeframes([]);
+    }
+  }, [formStrategyId, strategies, isCreateOpen]);
 
   const fetchStrategies = async () => {
     console.log('[DEBUG] fetchStrategies START');
@@ -214,7 +276,9 @@ export default function Backtest() {
         createdAt: b.created_at,
         // Phase 2-3: New fields
         signalTimeframe: b.signal_timeframe || b.config?.signal_timeframe || '1m',
-        fillPolicy: b.fill_policy || b.config?.fill_policy || 'optimistic',
+        marketFillPolicy: b.market_fill_policy || b.config?.market_fill_policy || 'close',
+        limitFillPolicy: b.limit_fill_policy || b.config?.limit_fill_policy || 'cross',
+        pricePathAssumption: b.price_path_assumption || b.config?.price_path_assumption || 'neutral',
       }));
       console.log('[DEBUG] setBacktests with', mapped.length, 'items');
       setBacktests(mapped);
@@ -387,11 +451,8 @@ export default function Backtest() {
 
   const handleCreateBacktest = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-
-    // Get strategy ID and exchange name from form
-    const strategyId = formData.get('strategy') as string;
-    const exchangeName = formData.get('exchangeName') as string;
+    const strategyId = formStrategyId;
+    const exchangeName = formExchangeName;
 
     // Validate strategy is selected
     if (!strategyId || strategyId === '__no_strategies__') {
@@ -413,42 +474,46 @@ export default function Backtest() {
       strategy_id: strategyId,
       exchange_name: exchangeName,
       config: {
-        symbol: formData.get('symbol'),
-        timeframe: formData.get('timeframe'),
+        symbol: formSymbol,
+        timeframe: '1m',
         // Convert date to datetime format (backend expects ISO datetime)
-        start_date: `${formData.get('startDate')}T00:00:00`,
-        end_date: `${formData.get('endDate')}T00:00:00`,
-        initial_capital: Number(formData.get('initialCapital')),
-        leverage: Number(formData.get('leverage')) || 1,
-        taker_fee_rate: formData.get('takerFee') ? Number(formData.get('takerFee')) : 0.04,
-        maker_fee_rate: formData.get('makerFee') ? Number(formData.get('makerFee')) : 0.02,
-        funding_rate_daily: formData.get('fundingRate') ? Number(formData.get('fundingRate')) : 0.03,
-        slippage_percent: formData.get('slippagePercent') ? Number(formData.get('slippagePercent')) : 0.1,
+        start_date: `${formStartDate}T00:00:00`,
+        end_date: `${formEndDate}T23:59:59`,
+        initial_capital: Number(formInitialCapital),
+        leverage: Number(formLeverage) || 1,
+        taker_fee_rate: formTakerFee ? Number(formTakerFee) : 0.04,
+        maker_fee_rate: formMakerFee ? Number(formMakerFee) : 0.02,
+        funding_rate_daily: formFundingRate ? Number(formFundingRate) : 0.03,
+        slippage_percent: formSlippagePercent ? Number(formSlippagePercent) : 0.1,
         position_sizing: 'percent_equity',
         position_size_percent: 100,
         mode: 'event_driven',
-        // Phase 2-3: New config fields (use state, not formData for Radix Select)
+        // Phase 2-3: New config fields (now all controlled)
         signal_timeframe: formSignalTimeframe,
-        fill_policy: formFillPolicy,
+        market_fill_policy: formMarketFillPolicy,
+        limit_fill_policy: formLimitFillPolicy,
+        price_path_assumption: formPricePathAssumption,
+        execution_delay_bars: Number(formExecutionDelayBars) || 0,
+        condition_timeframes: formConditionTimeframes.length > 0 ? formConditionTimeframes : undefined,
       }
     };
 
     console.log("DEBUG: Full payload =", JSON.stringify(payload, null, 2));
 
-    try {
-      console.log('Sending backtest request:', payload);
+    // Optimistic UI: Close dialog immediately for responsiveness
+    setIsCreateOpen(false);
 
-      const res = await apiClient.post('/api/v1/backtests', payload);
-
-      toast({ title: 'Backtest started successfully' });
-      setIsCreateOpen(false);
-
-      // Refresh list
-      fetchBacktests();
-    } catch (error: any) {
-      console.error("DEBUG: Catch error =", error);
-      toast({ title: error.message || 'Failed to start backtest', variant: 'destructive' });
-    }
+    // Fire-and-forget API call - don't await
+    apiClient.post('/api/v1/backtests', payload)
+      .then(() => {
+        toast({ title: 'Backtest started successfully' });
+        fetchBacktests(); // Refresh to get real data
+      })
+      .catch((error: any) => {
+        console.error("DEBUG: Catch error =", error);
+        toast({ title: error.message || 'Failed to start backtest', variant: 'destructive' });
+        fetchBacktests(); // Refresh in case of error too
+      });
   };
 
 
@@ -521,144 +586,302 @@ export default function Backtest() {
                 Create Backtest
               </Button>
             </DialogTrigger>
-            <DialogContent className="sm:max-w-[500px]">
+            <DialogContent className="sm:max-w-[600px]">
               <DialogHeader>
                 <DialogTitle>New Backtest</DialogTitle>
                 <DialogDescription>
                   Set up your strategy parameters for backtesting.
                 </DialogDescription>
               </DialogHeader>
-              <form onSubmit={handleCreateBacktest} className="space-y-4 pt-4">
-                <div className="space-y-2">
-                  <Label>Strategy</Label>
-                  <Select name="strategy" defaultValue={strategies[0]?.id || undefined} >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select strategy..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {strategies.length === 0 ? (
-                        <SelectItem value="__no_strategies__" disabled>No strategies available</SelectItem>
-                      ) : (
-                        strategies.map(s => (
-                          <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
+              <form onSubmit={handleCreateBacktest} className="space-y-4">
+                <Tabs defaultValue="general" className="w-full">
+                  <TabsList className="grid w-full grid-cols-4">
+                    <TabsTrigger value="general">General</TabsTrigger>
+                    <TabsTrigger value="execution">Execution</TabsTrigger>
+                    <TabsTrigger value="simulation">Simulation</TabsTrigger>
+                    <TabsTrigger value="fees">Fees</TabsTrigger>
+                  </TabsList>
 
-                </div>
+                  <TabsContent value="general" className="space-y-4 pt-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Strategy <span className="text-destructive">*</span></Label>
+                        <Select name="strategyId" value={formStrategyId} onValueChange={setFormStrategyId}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select strategy..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {strategies.length === 0 ? (
+                              <SelectItem value="__no_strategies__" disabled>No strategies available</SelectItem>
+                            ) : (
+                              strategies.map(s => (
+                                <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                              ))
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
 
-                <div className="space-y-2">
-                  <Label>Exchange <span className="text-destructive">*</span></Label>
-                  <Select name="exchangeName" defaultValue={exchanges[0] || undefined}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select exchange..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {exchanges.length === 0 ? (
-                        <SelectItem value="__no_exchanges__" disabled>No exchanges available</SelectItem>
-                      ) : (
-                        exchanges.map(e => (
-                          <SelectItem key={e} value={e}>{e}</SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                  {exchanges.length === 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      Please add an exchange connection in Exchange settings first.
-                    </p>
-                  )}
-                </div>
+                      <div className="space-y-2">
+                        <Label>Exchange <span className="text-destructive">*</span></Label>
+                        <Select name="exchangeName" value={formExchangeName} onValueChange={setFormExchangeName}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select exchange..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {exchanges.length === 0 ? (
+                              <SelectItem value="__no_exchanges__" disabled>No exchanges available</SelectItem>
+                            ) : (
+                              exchanges.map(e => (
+                                <SelectItem key={e} value={e}>{e}</SelectItem>
+                              ))
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Trading Pair</Label>
-                    <Input name="symbol" defaultValue="BTC/USDT" placeholder="e.g. BTC/USDT" required />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Data Resolution</Label>
-                    <Input value="1m (Fixed)" disabled className="bg-muted" />
-                    <input type="hidden" name="timeframe" value="1m" />
-                  </div>
-                </div>
+                    {exchanges.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Please add an exchange connection in Exchange settings first.
+                      </p>
+                    )}
 
-                {/* Phase 2-3: Advanced Config */}
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Signal Timeframe</Label>
-                    <Select value={formSignalTimeframe} onValueChange={setFormSignalTimeframe}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1m">1m (Standard)</SelectItem>
-                        <SelectItem value="5m">5m (HTF)</SelectItem>
-                        <SelectItem value="15m">15m (HTF)</SelectItem>
-                        <SelectItem value="30m">30m (HTF)</SelectItem>
-                        <SelectItem value="1h">1h (HTF)</SelectItem>
-                        <SelectItem value="4h">4h (HTF)</SelectItem>
-                        <SelectItem value="1d">1d (HTF)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Fill Policy</Label>
-                    <Select value={formFillPolicy} onValueChange={setFormFillPolicy}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="optimistic">Optimistic</SelectItem>
-                        <SelectItem value="neutral">Neutral</SelectItem>
-                        <SelectItem value="strict">Strict</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Trading Pair</Label>
+                        <Input name="symbol" value={formSymbol} onChange={(e) => setFormSymbol(e.target.value)} placeholder="e.g. BTC/USDT" required />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Initial Capital ($)</Label>
+                        <Input type="number" name="initialCapital" value={formInitialCapital} onChange={(e) => setFormInitialCapital(e.target.value)} required />
+                      </div>
+                    </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Start Date</Label>
-                    <Input type="date" name="startDate" defaultValue="2024-01-01" required />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>End Date</Label>
-                    <Input type="date" name="endDate" defaultValue="2024-03-01" required />
-                  </div>
-                </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Start Date</Label>
+                        <Input type="date" name="startDate" value={formStartDate} onChange={(e) => setFormStartDate(e.target.value)} required />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>End Date</Label>
+                        <Input type="date" name="endDate" value={formEndDate} onChange={(e) => setFormEndDate(e.target.value)} required />
+                      </div>
+                    </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Initial Capital ($)</Label>
-                    <Input type="number" name="initialCapital" defaultValue="10000" required />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Leverage (x)</Label>
-                    <Input type="number" name="leverage" defaultValue="1" min="1" max="125" required />
-                  </div>
-                </div>
+                    <div className="space-y-2">
+                      <Label>Leverage (x)</Label>
+                      <Input type="number" name="leverage" value={formLeverage} onChange={(e) => setFormLeverage(e.target.value)} min="1" max="125" required />
+                    </div>
+                  </TabsContent>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label>Taker Fee (%)</Label>
-                    <Input type="number" name="takerFee" defaultValue="0.04" step="0.01" />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Maker Fee (%)</Label>
-                    <Input type="number" name="makerFee" defaultValue="0.02" step="0.01" />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Funding/Day (%)</Label>
-                    <Input type="number" name="fundingRate" defaultValue="0.03" step="0.01" />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Slippage (%)</Label>
-                    <Input type="number" name="slippagePercent" defaultValue="0.1" min="0.1" max="5.0" step="0.1" />
-                  </div>
-                </div>
+                  <TabsContent value="execution" className="space-y-4 pt-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Signal Timeframe</Label>
+                        <Select value={formSignalTimeframe} onValueChange={setFormSignalTimeframe}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="1m">1m (Standard)</SelectItem>
+                            <SelectItem value="5m">5m (HTF)</SelectItem>
+                            <SelectItem value="15m">15m (HTF)</SelectItem>
+                            <SelectItem value="30m">30m (HTF)</SelectItem>
+                            <SelectItem value="1h">1h (HTF)</SelectItem>
+                            <SelectItem value="4h">4h (HTF)</SelectItem>
+                            <SelectItem value="1d">1d (HTF)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Data Resolution</Label>
+                        <Input value="1m (Fixed)" disabled className="bg-muted text-xs h-9" />
+                        <input type="hidden" name="timeframe" value="1m" />
+                      </div>
+                    </div>
 
-                <div className="flex gap-3 pt-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-1.5">
+                          <Label>Execution Delay (bars)</Label>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-[300px] text-xs">
+                              <p>
+                                Execution Delay mô phỏng độ trễ thực tế từ khi có tín hiệu đến khi lệnh được khớp trên sàn (do độ trễ mạng, xử lý API).
+                              </p>
+                              <p className="mt-1">
+                                Việc cài đặt độ trễ giúp kết quả backtest sát với thực tế hơn, tránh kỳ vọng quá cao vào các chiến thuật nhạy cảm với thời gian.
+                              </p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </div>
+                        <Input type="number" name="executionDelayBars" value={formExecutionDelayBars} onChange={(e) => setFormExecutionDelayBars(e.target.value)} min="0" step="1" />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Slippage (%)</Label>
+                        <Input type="number" name="slippagePercent" value={formSlippagePercent} onChange={(e) => setFormSlippagePercent(e.target.value)} min="0.0" max="5.0" step="0.1" />
+                      </div>
+                    </div>
+
+                    {/* Condition Timeframes - Only show for Multi-Timeframe strategies (or if manual selection allowed) */
+                      /* User Rule: "Single Timeframe... hiển thị như cũ... không có check timeframe checkbox" */
+                      /* User Rule: "Multi Timeframe... auto tick check toàn bộ... không cho người dùng thay đổi" */
+                      (() => {
+                        const selectedStrat = strategies.find(s => s.id === formStrategyId);
+                        const isMultiTimeframe = selectedStrat?.required_timeframes && selectedStrat.required_timeframes.length > 0;
+
+                        if (!isMultiTimeframe) return null;
+
+                        return (
+                          <div className="space-y-3 pt-2">
+                            <div className="flex items-center gap-1.5">
+                              <Label>Condition Timeframes (Required by Strategy)</Label>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                                </TooltipTrigger>
+                                <TooltipContent side="right" className="max-w-[300px] text-xs">
+                                  These timeframes are required by the selected strategy logic.
+                                </TooltipContent>
+                              </Tooltip>
+                            </div>
+                            <div className="flex flex-wrap gap-4 border rounded-md p-3 bg-muted/20 opacity-80 cursor-not-allowed">
+                              {['5m', '15m', '30m', '1h', '4h', '1d'].map((tf) => (
+                                <div key={tf} className="flex items-center space-x-2">
+                                  <Checkbox
+                                    id={`ctf-${tf}`}
+                                    checked={formConditionTimeframes.includes(tf)}
+                                    disabled={true} // Always disabled as per requirement
+                                  />
+                                  <Label htmlFor={`ctf-${tf}`} className="text-sm font-normal cursor-not-allowed">{tf}</Label>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                  </TabsContent>
+
+                  <TabsContent value="simulation" className="space-y-4 pt-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-1.5">
+                          <Label>Market Fill Price</Label>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-[350px] text-xs">
+                              <p className="font-semibold mb-1">Giá khớp lệnh thị trường (Market):</p>
+                              <p>Chọn mức giá giả định để khớp các lệnh Market (hoặc entry tín hiệu):</p>
+                              <ul className="list-disc pl-4 mt-1 space-y-1">
+                                <li><strong>Close:</strong> Khớp tại giá đóng cửa của nến (Standard).</li>
+                                <li><strong>Low:</strong> Khớp tại giá thấp nhất (Lạc quan cho lệnh Buy).</li>
+                                <li><strong>High:</strong> Khớp tại giá cao nhất (Bi quan cho lệnh Buy).</li>
+                              </ul>
+                            </TooltipContent>
+                          </Tooltip>
+                        </div>
+                        <Select value={formMarketFillPolicy} onValueChange={setFormMarketFillPolicy}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="close">Close (Standard)</SelectItem>
+                            <SelectItem value="low">Low Price</SelectItem>
+                            <SelectItem value="high">High Price</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-1.5">
+                          <Label>Limit Fill Condition</Label>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-[350px] text-xs">
+                              <p className="font-semibold mb-1">Điều kiện khớp lệnh giới hạn (Limit):</p>
+                              <p>Quyết định khi nào một lệnh Limit/TP/SL được coi là đã khớp:</p>
+                              <ul className="list-disc pl-4 mt-1 space-y-1">
+                                <li><strong>Touch:</strong> Khớp ngay khi giá chạm mức Limit.</li>
+                                <li><strong>Cross:</strong> Chỉ khớp khi giá thực sự vượt qua mức Limit (Thực tế hơn).</li>
+                                <li><strong>Cross + Volume:</strong> Yêu cầu vượt qua và giả định có đủ thanh khoản.</li>
+                              </ul>
+                            </TooltipContent>
+                          </Tooltip>
+                        </div>
+                        <Select value={formLimitFillPolicy} onValueChange={setFormLimitFillPolicy}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="touch">Touch (Optimistic)</SelectItem>
+                            <SelectItem value="cross">Cross (Realistic)</SelectItem>
+                            <SelectItem value="cross_volume">Cross + Volume</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-1.5">
+                        <Label>Conflict Resolution (TP/SL)</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="max-w-[350px] text-xs">
+                            <p className="font-semibold mb-1">Giải quyết xung đột SL/TP:</p>
+                            <p>Khi cả TP và SL đều bị chạm trong cùng một cây nến 1 phút:</p>
+                            <ul className="list-disc pl-4 mt-1 space-y-1">
+                              <li><strong>SL First:</strong> Ưu tiên khớp SL trước (Bảo thủ/An toàn).</li>
+                              <li><strong>TP First:</strong> Ưu tiên khớp TP trước (Lạc quan).</li>
+                              <li><strong>Realistic:</strong> Engine tự tính toán dựa trên hướng di chuyển của nến.</li>
+                            </ul>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <Select value={formPricePathAssumption} onValueChange={setFormPricePathAssumption}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="neutral">SL First (Conservative)</SelectItem>
+                          <SelectItem value="optimistic">TP First (Optimistic)</SelectItem>
+                          <SelectItem value="realistic">Realistic Path</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="fees" className="space-y-4 pt-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label>Taker Fee (%)</Label>
+                        <Input type="number" name="takerFee" value={formTakerFee} onChange={(e) => setFormTakerFee(e.target.value)} step="0.01" />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Maker Fee (%)</Label>
+                        <Input type="number" name="makerFee" value={formMakerFee} onChange={(e) => setFormMakerFee(e.target.value)} step="0.01" />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Funding/Day (%)</Label>
+                      <Input type="number" name="fundingRate" value={formFundingRate} onChange={(e) => setFormFundingRate(e.target.value)} step="0.01" />
+                    </div>
+                    <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                      <p>Các thông số phí và funding giúp mô phỏng chính xác hơn lợi nhuận thực tế sau khi trừ đi các chi phí giao dịch và duy trì vị thế.</p>
+                    </div>
+                  </TabsContent>
+                </Tabs>
+
+                <div className="flex gap-3 pt-4 border-t mt-4">
                   <Button type="button" variant="outline" onClick={() => setIsCreateOpen(false)} className="flex-1">
                     Cancel
                   </Button>
@@ -768,6 +991,15 @@ export default function Backtest() {
                   ))}
                 </SelectContent>
               </Select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAdvancedColumns(!showAdvancedColumns)}
+                className={cn("h-10 gap-2 transition-all", showAdvancedColumns && "bg-primary/10 border-primary/50 text-primary")}
+              >
+                <Settings2 className="h-4 w-4" />
+                {showAdvancedColumns ? "Hide Advanced" : "Show Advanced"}
+              </Button>
             </div>
 
             {/* Bulk Actions */}
@@ -835,38 +1067,66 @@ export default function Backtest() {
                         Leverage <SortIcon field="leverage" />
                       </button>
                     </TableHead>
-                    <TableHead className="text-right">
-                      <button
-                        onClick={() => handleSort('fundingRate')}
-                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
-                      >
-                        Funding <SortIcon field="fundingRate" />
-                      </button>
-                    </TableHead>
-                    <TableHead className="text-right">
-                      <button
-                        onClick={() => handleSort('makerFee')}
-                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
-                      >
-                        Maker <SortIcon field="makerFee" />
-                      </button>
-                    </TableHead>
-                    <TableHead className="text-right">
-                      <button
-                        onClick={() => handleSort('takerFee')}
-                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
-                      >
-                        Taker <SortIcon field="takerFee" />
-                      </button>
-                    </TableHead>
-                    <TableHead className="text-right">
-                      <button
-                        onClick={() => handleSort('slippagePercent')}
-                        className="flex items-center justify-end w-full hover:text-foreground transition-colors"
-                      >
-                        Slippage <SortIcon field="slippagePercent" />
-                      </button>
-                    </TableHead>
+                    {showAdvancedColumns && (
+                      <>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('fundingRate')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Funding <SortIcon field="fundingRate" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('makerFee')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Maker <SortIcon field="makerFee" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('takerFee')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Taker <SortIcon field="takerFee" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('slippagePercent')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Slippage <SortIcon field="slippagePercent" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('marketFillPolicy')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Market Fill <SortIcon field="marketFillPolicy" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('limitFillPolicy')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Limit Cond <SortIcon field="limitFillPolicy" />
+                          </button>
+                        </TableHead>
+                        <TableHead className="text-right">
+                          <button
+                            onClick={() => handleSort('pricePathAssumption')}
+                            className="flex items-center justify-end w-full hover:text-foreground transition-colors"
+                          >
+                            Conflict Res <SortIcon field="pricePathAssumption" />
+                          </button>
+                        </TableHead>
+                      </>
+                    )}
                     <TableHead className="text-right">
                       <button
                         onClick={() => handleSort('totalTrades')}
@@ -922,7 +1182,7 @@ export default function Backtest() {
                 <TableBody>
                   {paginatedBacktests.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center h-24 text-muted-foreground">
+                      <TableCell colSpan={showAdvancedColumns ? 21 : 14} className="text-center h-24 text-muted-foreground">
                         No backtests found. Create one to get started.
                       </TableCell>
                     </TableRow>
@@ -963,18 +1223,31 @@ export default function Backtest() {
                         <TableCell className="text-right font-mono">
                           {backtest.leverage}x
                         </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.fundingRate}%
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.makerFee}%
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.takerFee}%
-                        </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {backtest.slippagePercent}%
-                        </TableCell>
+                        {showAdvancedColumns && (
+                          <>
+                            <TableCell className="text-right font-mono">
+                              {backtest.fundingRate}%
+                            </TableCell>
+                            <TableCell className="text-right font-mono">
+                              {backtest.makerFee}%
+                            </TableCell>
+                            <TableCell className="text-right font-mono">
+                              {backtest.takerFee}%
+                            </TableCell>
+                            <TableCell className="text-right font-mono">
+                              {backtest.slippagePercent}%
+                            </TableCell>
+                            <TableCell className="text-right font-mono capitalize">
+                              {backtest.marketFillPolicy}
+                            </TableCell>
+                            <TableCell className="text-right font-mono capitalize">
+                              {backtest.limitFillPolicy}
+                            </TableCell>
+                            <TableCell className="text-right font-mono capitalize">
+                              {backtest.pricePathAssumption}
+                            </TableCell>
+                          </>
+                        )}
                         <TableCell className="text-right font-mono">
                           {backtest.totalTrades ?? '-'}
                         </TableCell>

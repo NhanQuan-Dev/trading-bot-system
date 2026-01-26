@@ -20,10 +20,14 @@ class BacktestTrade:
     
     # Entry
     entry_time: datetime = field(default_factory=datetime.utcnow)
-    entry_price: Decimal = Decimal("0")
-    entry_quantity: Decimal = Decimal("0")
+    entry_price: Decimal = Decimal("0")  # Average entry price (after scale-in)
+    entry_quantity: Decimal = Decimal("0")  # Total quantity (after scale-in)
     entry_commission: Decimal = Decimal("0")
     entry_slippage: Decimal = Decimal("0")
+    
+    # Initial entry (before scale-in)
+    initial_entry_price: Optional[Decimal] = None
+    initial_entry_quantity: Optional[Decimal] = None
     
     # Exit
     exit_time: Optional[datetime] = None
@@ -31,6 +35,11 @@ class BacktestTrade:
     exit_quantity: Optional[Decimal] = None
     exit_commission: Decimal = Decimal("0")
     exit_slippage: Decimal = Decimal("0")
+    
+    # Detailed Fees (Total Commission = Maker + Taker + Funding)
+    maker_fee: Decimal = Decimal("0")
+    taker_fee: Decimal = Decimal("0")
+    funding_fee: Decimal = Decimal("0")
     
     # P&L
     gross_pnl: Decimal = Decimal("0")
@@ -67,6 +76,7 @@ class BacktestTrade:
         exit_quantity: Decimal = None,
         commission: Decimal = Decimal("0"),
         slippage: Decimal = Decimal("0"),
+        leverage: Decimal = Decimal("1"),
     ):
         """Close the trade and calculate P&L."""
         self.exit_time = exit_time
@@ -88,10 +98,11 @@ class BacktestTrade:
         )
         self.net_pnl = self.gross_pnl - total_costs
         
-        # Calculate return percentage
+        # Calculate return percentage (Leveraged ROI)
         entry_value = self.entry_price * self.entry_quantity
         if entry_value > 0:
-            self.pnl_percent = (self.net_pnl / entry_value) * Decimal("100")
+            initial_margin = entry_value / leverage
+            self.pnl_percent = (self.net_pnl / initial_margin) * Decimal("100")
     
     @property
     def is_open(self) -> bool:
@@ -116,11 +127,16 @@ class BacktestPosition:
     """Current position state during backtest."""
     
     symbol: str
+    id: UUID = field(default_factory=uuid4)
     direction: Optional[TradeDirection] = None
     quantity: Decimal = Decimal("0")
     avg_entry_price: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
     current_price: Decimal = Decimal("0")
+    
+    # Initial entry tracking (before scale-in)
+    initial_entry_price: Optional[Decimal] = None
+    initial_quantity: Optional[Decimal] = None
     
     # Stop Loss / Take Profit
     stop_loss: Optional[Decimal] = None
@@ -132,9 +148,14 @@ class BacktestPosition:
     highest_price_since_entry: Optional[Decimal] = None  # For LONG: track highest
     lowest_price_since_entry: Optional[Decimal] = None   # For SHORT: track lowest
     
+    # Margin and Liquidation
+    isolated_margin: Decimal = Decimal("0")
+    liquidation_price: Optional[Decimal] = None
+    
     # Metadata
     entry_time: Optional[str] = None
     entry_commission: Decimal = Decimal("0")
+    accumulated_funding: Decimal = Decimal("0")  # Track funding fees paid/received
     metadata: Optional[Dict[str, Any]] = None
     
     def is_flat(self) -> bool:
@@ -226,6 +247,9 @@ class BacktestResults:
     
     # Trade details
     trades: List[BacktestTrade] = field(default_factory=list)
+    
+    # Event timeline
+    events: List[Any] = field(default_factory=list)
     
     # Drawdown history
     drawdowns: List[Dict[str, Any]] = field(default_factory=list)
@@ -419,3 +443,8 @@ class BacktestRun:
     def fill_policy(self) -> str:
         """Get fill policy from config."""
         return self.config.fill_policy or "optimistic"
+        
+    @property
+    def leverage(self) -> int:
+        """Get leverage from config."""
+        return self.config.leverage

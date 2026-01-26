@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -149,13 +149,16 @@ class BacktestConfig:
     execution_delay_bars: int = 0
     
     # Spec-required Phase 1: Fill policy
-    fill_policy: str = "optimistic"  # optimistic | neutral | strict
+    fill_policy: str = "optimistic"  # DEPRECATED: Use market_fill_policy and limit_fill_policy
+    market_fill_policy: str = "close"  # close | low | high
+    limit_fill_policy: str = "cross"  # touch | cross | cross_volume
     price_path_assumption: str = "neutral"  # neutral | optimistic | realistic
     
     # Spec-required Phase 2: Multi-timeframe
     data_timeframe: str = "1m"  # Always 1m for spec compliance
     signal_timeframe: str = "1m"  # HTF for strategy signals (1h, 4h, 1d)
-    
+    condition_timeframes: Optional[List[str]] = None  # List of TFs for multi-tf strategies
+
     # Spec-required Phase 3: Setup-Trigger
     enable_setup_trigger_model: bool = False
     setup_validity_window_minutes: int = 60
@@ -169,9 +172,9 @@ class BacktestConfig:
 class EquityCurvePoint:
     """Single point on the equity curve."""
     timestamp: datetime
-    equity: Decimal
-    cash: Decimal
-    positions_value: Decimal
-    drawdown: Decimal
-    drawdown_percent: Decimal
-    return_percent: Decimal
+    equity: float
+    cash: float
+    positions_value: float
+    drawdown: float
+    drawdown_percent: float
+    return_percent: float

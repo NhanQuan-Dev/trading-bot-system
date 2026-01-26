@@ -3,7 +3,7 @@ from .base import TimestampMixin, SoftDeleteMixin, UUIDPrimaryKeyMixin, generate
 from .core_models import UserModel, ExchangeModel, APIConnectionModel, DatabaseConfigModel, SymbolModel
 from .trading_models import OrderModel, PositionModel, TradeModel
 from .bot_models import BotModel, StrategyModel, BacktestModel, BotPerformanceModel
-from .backtest_models import BacktestRunModel, BacktestResultModel, BacktestTradeModel
+from .backtest_models import BacktestRunModel, BacktestResultModel, BacktestTradeModel, BacktestEventModel
 from .market_data_models import MarketPriceModel, OrderBookSnapshotModel
 from .risk_models import RiskLimitModel, RiskAlertModel, AlertModel, EventQueueModel
 
@@ -36,6 +36,7 @@ __all__ = [
     "BacktestRunModel",
     "BacktestResultModel",
     "BacktestTradeModel",
+    "BacktestEventModel",
     
     # Market data models
     "MarketPriceModel",

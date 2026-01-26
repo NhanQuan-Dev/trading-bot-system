@@ -690,6 +690,9 @@ console.log('profit_factor type:', typeof backtest.profit_factor);
 | Backtest stuck at 99% | Missing field in model save (NULL) | Add field to default values and population |
 | `X.toFixed is not a function` | Decimal serialized as string | Use `parseFloat(String(value))` |
 | Metric shows 0.00/blank despite data | Missing eager loading for related table | Add `selectinload()` for result relationship |
+| `UnboundLocalError: ... 'candle_high'` | Variable used before assignment in loop | Reorder assignments or use `.get()` |
+| ROI showing ~1% for 20x leverage | Unleveraged PnL calc (Return on Notional) | Use Return on Margin (PnL / (Notional/Leverage)) |
+| Trade Log showing wrong Entry Price | Missing initial entry tracking for scale-ins | Add `initial_entry_price` to model and response |
 
 ---
 
@@ -723,6 +726,9 @@ console.log('profit_factor type:', typeof backtest.profit_factor);
 26. **Verify routers are registered in FastAPI app** - Importing module ≠ registering router
 27. **Match service code to actual DB schema** - Column names in code must match actual table columns
 28. **Handle optional dependencies gracefully** - BotManager may not be initialized, catch errors
+29. **Order of operations in simulation loops** - Always assign candle variables (high/low) BEFORE using them in PnL/SL/TP checks
+30. **Futures PnL % should use Return on Margin** - Standardize ROI calculation by dividing Net PnL by (Notional / Leverage) to match exchanges
+31. **Track Initial Entry for Scale-ins** - Average Entry Price changes after additions. Store `initial_entry_price` to show correct "Entry" vs "Avg" in UI
 
 ---
 
@@ -3933,6 +3939,62 @@ When data is "missing" on the frontend but present in API response:
 **Related Files:**
 - `frontend/src/pages/Bots.tsx` (frontend field access)
 - `backend/src/trading/presentation/controllers/bots.py` (API response schema)
+
+### Pattern 35: Backend UnboundLocalError in Multi-Timeframe Processing
+
+**Symptom:**
+`UnboundLocalError: cannot access local variable 'candle_high' where it is not associated with a value`
+
+**Root Cause:**
+In methods processing multiple timeframes (e.g. `_process_candle` in `BacktestEngine`), variables like `candle_high` or `candle_low` were being used for SL/TP or drawdown checks BEFORE they were assigned from the current candle dictionary.
+
+**Fix:**
+Ensure all candle-derived variables are extracted at the very top of the processing loop.
+
+```python
+# ❌ BAD - used before assign
+if price > candle_high: ... 
+candle_high = Decimal(str(candle['high']))
+
+# ✅ GOOD
+candle_high = Decimal(str(candle['high']))
+if price > candle_high: ...
+```
+
+---
+
+### Pattern 36: Missing Historical Entry Price for Scaled-In Trades
+
+**Symptom:**
+UI shows Entry Price as the same as Average Entry Price even after adding to a position. This makes it impossible to see the "Original" entry level.
+
+**Root Cause:**
+The `BacktestTrade` model only had `entry_price` (which was being overwritten by the average). It lacked dedicated fields for tracking the first entry.
+
+**Fix:**
+1. Update `backtest_trades` table: Add `initial_entry_price` and `initial_entry_quantity`.
+2. Update `BacktestEngine`: Pass `initial_entry_price` from `BacktestPosition` to `BacktestTrade`.
+3. Update API Controller: Include new fields in the response dictionary.
+4. Update Frontend: If `initial_entry_price` exists and differs from `entry_price`, display both.
+
+---
+
+### Pattern 37: Incorrect ROI Calculation (Unleveraged vs Leveraged)
+
+**Symptom:**
+Backtest results show very low ROI (e.g. 1%) for a trade where price moved 17% with 20x leverage. Expected ROI ~340%.
+
+**Root Cause:**
+The system was calculating "Return on Notional" (`Net PnL / Total Position Value`) instead of the industry-standard "Return on Margin" (`Net PnL / Initial Margin`).
+
+**Fix:**
+Update the ROI formula in `BacktestEngine` and `BacktestTrade` entity:
+`initial_margin = (entry_price * quantity) / leverage`
+`pnl_percent = (net_pnl / initial_margin) * 100`
+
+**Related Files:**
+- `backend/src/trading/infrastructure/backtesting/backtest_engine.py`
+- `backend/src/trading/domain/backtesting/entities.py`
 
 ---
 

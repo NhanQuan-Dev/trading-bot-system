@@ -1,7 +1,7 @@
 """Bot and Strategy repository SQLAlchemy implementation."""
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 import logging
 import uuid
@@ -380,7 +380,14 @@ class StrategyRepository(IStrategyRepository):
     async def find_by_user(self, user_id: uuid.UUID) -> List[Strategy]:
         """Find all strategies for a user."""
         stmt = select(StrategyModel).where(
-            and_(StrategyModel.user_id == user_id, StrategyModel.deleted_at.is_(None))
+            and_(
+                or_(
+                    StrategyModel.user_id == user_id, 
+                    # Include default system strategies
+                    StrategyModel.user_id == uuid.UUID("00000000-0000-0000-0000-000000000001")
+                ),
+                StrategyModel.deleted_at.is_(None)
+            )
         ).order_by(StrategyModel.created_at.desc())
         
         result = await self._session.execute(stmt)

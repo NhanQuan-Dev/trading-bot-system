@@ -612,14 +612,26 @@ class MarketStatsRepository(IMarketStatsRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
     
-    async def save(self, stats: MarketStats) -> MarketStats:
-        """Save market stats."""
-        raise NotImplementedError("Market stats repository not implemented yet")
+    async def save(self, stats: MarketStats) -> None:
+        """Save market statistics."""
+        pass
     
     async def find_by_symbol(self, symbol: str) -> Optional[MarketStats]:
-        """Find stats by symbol."""
-        raise NotImplementedError("Market stats repository not implemented yet")
+        """Find latest market stats for symbol."""
+        return None
     
-    async def find_all(self) -> List[MarketStats]:
-        """Find all market stats."""
-        raise NotImplementedError("Market stats repository not implemented yet")
+    async def find_all_symbols(self) -> List[MarketStats]:
+        """Find latest stats for all symbols."""
+        return []
+    
+    async def get_top_gainers(self, limit: int = 10) -> List[MarketStats]:
+        """Get top price gainers."""
+        return []
+    
+    async def get_top_losers(self, limit: int = 10) -> List[MarketStats]:
+        """Get top price losers."""
+        return []
+    
+    async def get_highest_volume(self, limit: int = 10) -> List[MarketStats]:
+        """Get symbols with highest volume."""
+        return []

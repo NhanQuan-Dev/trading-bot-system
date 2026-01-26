@@ -4,7 +4,7 @@ Strategy Abstract Base Class.
 This module defines the interface that all trading strategies must implement.
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from decimal import Decimal
 import logging
 
@@ -47,6 +47,33 @@ class StrategyBase(ABC):
     @abstractmethod
     def description(self) -> str:
         """User-friendly description of strategy logic"""
+        pass
+
+    @property
+    def timeframe_mode(self) -> str:
+        """
+        'single' or 'multi'. Default is 'single' for backward compatibility.
+        Multi mode requires implementing calculate_signal with context.
+        """
+        return "single"
+
+    @property
+    def required_timeframes(self) -> List[str]:
+        """
+        List of timeframes needed for multi-TF strategies (e.g. ['15m', '30m', '1h']).
+        Empty for single-TF.
+        """
+        return []
+
+    def pre_calculate(self, candles: List[Dict[str, Any]], htf_candles: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+        """
+        Optional hook for vectorized pre-calculations before backtest loop.
+        Allows strategies to calculate all indicators at once using optimized libraries.
+        
+        Args:
+            candles: List of execution timeframe candles (usually 1m)
+            htf_candles: Optional dictionary of {timeframe: candles_list} for MTF
+        """
         pass
 
     @abstractmethod

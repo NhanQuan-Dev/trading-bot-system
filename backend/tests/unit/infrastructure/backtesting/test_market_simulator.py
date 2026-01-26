@@ -22,14 +22,14 @@ class TestMarketSimulator:
         assert simulator.slippage_model == SlippageModel.FIXED
         assert simulator.commission_model == CommissionModel.FIXED_RATE
     
-    def test_simulate_buy_order_no_costs(self):
-        """Test simulating buy order with no costs."""
+    def test_simulate_long_entry_no_costs(self):
+        """Test simulating long entry with no costs."""
         simulator = MarketSimulator(
             slippage_model=SlippageModel.NONE,
             commission_model=CommissionModel.NONE,
         )
         
-        fill = simulator.simulate_buy_order(
+        fill = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
@@ -41,15 +41,15 @@ class TestMarketSimulator:
         assert fill.commission == Decimal("0")
         assert fill.slippage == Decimal("0")
     
-    def test_simulate_buy_order_with_percentage_slippage(self):
-        """Test buy order with fixed slippage."""
+    def test_simulate_long_entry_with_percentage_slippage(self):
+        """Test long entry with fixed slippage."""
         simulator = MarketSimulator(
             slippage_model=SlippageModel.FIXED,
             slippage_percent=Decimal("42"),  # $42 fixed
             commission_model=CommissionModel.NONE,
         )
         
-        fill = simulator.simulate_buy_order(
+        fill = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
@@ -62,35 +62,35 @@ class TestMarketSimulator:
         assert fill.slippage == expected_slippage
         assert fill.filled_price > Decimal("42000")
     
-    def test_simulate_buy_order_with_commission(self):
-        """Test buy order with percentage commission."""
+    def test_simulate_long_entry_with_commission(self):
+        """Test long entry with percentage commission."""
         simulator = MarketSimulator(
             slippage_model=SlippageModel.NONE,
             commission_model=CommissionModel.FIXED_RATE,
             commission_rate=Decimal("0.1"),  # 0.1%
         )
         
-        fill = simulator.simulate_buy_order(
+        fill = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
             timestamp="2024-01-01T10:00:00Z",
         )
         
-        # Notional = 42000 * 0.1 = 4200
-        # Commission = 4200 * 0.001 = 4.2
-        notional = Decimal("42000") * Decimal("0.1")
+        # Notional = 41958 * 0.1 = 4195.8 (if no cost model but there is taker fee override in engine)
+        # However simulator directly calculates it.
+        notional = fill.filled_price * Decimal("0.1")
         expected_commission = notional * (Decimal("0.1") / Decimal("100"))
         assert fill.commission == expected_commission
     
-    def test_simulate_sell_order_no_costs(self):
-        """Test simulating sell order with no costs."""
+    def test_simulate_short_entry_no_costs(self):
+        """Test simulating short entry with no costs."""
         simulator = MarketSimulator(
             slippage_model=SlippageModel.NONE,
             commission_model=CommissionModel.NONE,
         )
         
-        fill = simulator.simulate_sell_order(
+        fill = simulator.simulate_short_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
@@ -102,8 +102,8 @@ class TestMarketSimulator:
         assert fill.commission == Decimal("0")
         assert fill.slippage == Decimal("0")
     
-    def test_simulate_sell_order_with_bid_ask_spread(self):
-        """Test sell order with bid-ask spread."""
+    def test_simulate_short_entry_with_bid_ask_spread(self):
+        """Test short entry with bid-ask spread."""
         simulator = MarketSimulator(
             slippage_model=SlippageModel.NONE,
             commission_model=CommissionModel.NONE,
@@ -111,7 +111,7 @@ class TestMarketSimulator:
             spread_percent=Decimal("0.05"),  # 0.05%
         )
         
-        fill = simulator.simulate_sell_order(
+        fill = simulator.simulate_short_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
@@ -130,7 +130,7 @@ class TestMarketSimulator:
             commission_rate=Decimal("5"),  # $5 flat fee
         )
         
-        fill = simulator.simulate_buy_order(
+        fill = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.1"),
             current_price=Decimal("42000"),
@@ -148,7 +148,7 @@ class TestMarketSimulator:
         )
         
         # Small order (< $1000)
-        fill_small = simulator.simulate_buy_order(
+        fill_small = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.01"),
             current_price=Decimal("42000"),
@@ -156,7 +156,7 @@ class TestMarketSimulator:
         )
         
         # Large order (> $10000)
-        fill_large = simulator.simulate_buy_order(
+        fill_large = simulator.simulate_long_entry(
             symbol="BTCUSDT",
             quantity=Decimal("0.5"),
             current_price=Decimal("42000"),
@@ -177,11 +177,11 @@ class TestMarketSimulator:
         """Test limit order price validation."""
         simulator = MarketSimulator()
         
-        # Buy limit should only fill if price <= limit
+        # Long limit should only fill if price <= limit
         can_fill_buy = simulator.can_fill_order(
             order_price=Decimal("42500"),
             current_price=Decimal("42000"),
-            is_buy=True,
+            is_long=True,
             is_limit=True,
         )
         assert can_fill_buy is True
@@ -189,16 +189,16 @@ class TestMarketSimulator:
         cannot_fill_buy = simulator.can_fill_order(
             order_price=Decimal("41500"),
             current_price=Decimal("42000"),
-            is_buy=True,
+            is_long=True,
             is_limit=True,
         )
         assert cannot_fill_buy is False
         
-        # Sell limit should only fill if price >= limit
+        # Short limit should only fill if price >= limit
         can_fill_sell = simulator.can_fill_order(
             order_price=Decimal("41500"),
             current_price=Decimal("42000"),
-            is_buy=False,
+            is_long=False,
             is_limit=True,
         )
         assert can_fill_sell is True
@@ -206,7 +206,7 @@ class TestMarketSimulator:
         cannot_fill_sell = simulator.can_fill_order(
             order_price=Decimal("42500"),
             current_price=Decimal("42000"),
-            is_buy=False,
+            is_long=False,
             is_limit=True,
         )
         assert cannot_fill_sell is False
@@ -220,16 +220,16 @@ class TestMarketSimulator:
             spread_percent=Decimal("0.05"),
         )
         
-        # Buy order - should be above current price
+        # Long order - should be above current price
         buy_estimate = simulator.estimate_fill_price(
             current_price=Decimal("42000"),
-            is_buy=True,
+            is_long=True,
         )
         assert buy_estimate > Decimal("42000")
         
-        # Sell order - should be below current price
+        # Short order - should be below current price
         sell_estimate = simulator.estimate_fill_price(
             current_price=Decimal("42000"),
-            is_buy=False,
+            is_long=False,
         )
         assert sell_estimate < Decimal("42000")

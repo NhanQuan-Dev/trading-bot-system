@@ -3,8 +3,9 @@
 import logging
 from decimal import Decimal
 from typing import List, Dict, Optional, Callable, Union, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
+import asyncio
 
 from ...domain.backtesting import (
     BacktestRun,
@@ -23,7 +24,7 @@ from ...domain.backtesting import (
 )
 from .metrics_calculator import MetricsCalculator
 from .market_simulator import MarketSimulator
-from .timeframe_utils import resample_candles_to_htf, get_candles_in_htf_window, get_next_htf_window_candles
+from .timeframe_utils import resample_candles_to_htf, get_candles_in_htf_window, get_next_htf_window_candles, MultiTimeframeContext
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +39,25 @@ class BacktestEngine:
         market_simulator: Optional[MarketSimulator] = None,
     ):
         """Initialize backtesting engine."""
-        self.config = config
+        # Ensure numeric config fields are Decimal for calculation safety
+        self.config = self._ensure_decimal_config(config)
+        
         self.metrics_calculator = metrics_calculator or MetricsCalculator()
         self.market_simulator = market_simulator or MarketSimulator(
-            slippage_model=config.slippage_model,
-            slippage_percent=config.slippage_percent,
-            commission_model=config.commission_model,
-            commission_rate=config.commission_percent,  # Note: MarketSimulator param is commission_rate
-            fill_policy=config.fill_policy,  # Spec-required: Pass fill policy configuration
+            slippage_model=self.config.slippage_model,
+            slippage_percent=self.config.slippage_percent,
+            commission_model=self.config.commission_model,
+            commission_rate=self.config.commission_percent,
+            use_bid_ask_spread=self.config.use_bid_ask_spread if hasattr(self.config, 'use_bid_ask_spread') else False,
+            spread_percent=self.config.spread_percent if hasattr(self.config, 'spread_percent') else Decimal("0.05"),
+            market_fill_policy=self.config.market_fill_policy,
+            limit_fill_policy=self.config.limit_fill_policy,
         )
-        
+        logger.info(f"ENGINE INITIALIZED: Leverage: {self.config.leverage}, HTF: {self.config.signal_timeframe}")
+
         # State
-        self.equity = config.initial_capital
-        self.peak_equity = config.initial_capital
+        self.equity = self.config.initial_capital
+        self.peak_equity = self.config.initial_capital
         self.current_position: Optional[BacktestPosition] = None
         self.trades: List[BacktestTrade] = []
         self.equity_curve: List[EquityCurvePoint] = []
@@ -67,18 +74,39 @@ class BacktestEngine:
         self.backtest_run_id: Optional[UUID] = None  # Set when backtest starts
         
         # Stats
-        self.equity_curve: List[EquityCurvePoint] = []
         self.last_funding_time: Optional[datetime] = None
-        
-        # Stats
         self.total_bars_processed = 0
         self.signals_generated = 0
+
+    def _ensure_decimal_config(self, config: BacktestConfig) -> BacktestConfig:
+        """Convert float config fields to Decimal for safety using dataclasses.replace."""
+        import dataclasses
+        fields_to_convert = [
+            'initial_capital', 'slippage_percent', 'commission_percent',
+            'taker_fee_rate', 'maker_fee_rate', 'funding_rate_daily',
+            'margin_requirement', 'position_size_value', 'leverage'
+        ]
+        
+        changes = {}
+        for field in fields_to_convert:
+            if hasattr(config, field):
+                val = getattr(config, field)
+                if val is not None:
+                    try:
+                        changes[field] = Decimal(str(val))
+                    except (ValueError, TypeError):
+                        pass
+        
+        if changes:
+             return dataclasses.replace(config, **changes)
+        return config
     
     def _emit_event(
         self,
         event_type: BacktestEventType,
         details: Dict[str, Any],
         timestamp: Optional[datetime] = None,
+        trade_id: Optional[UUID] = None,
     ) -> None:
         """Emit a backtest event for debugging and replay."""
         if not self.backtest_run_id:
@@ -90,6 +118,7 @@ class BacktestEngine:
             event_type=event_type,
             timestamp=timestamp or datetime.utcnow(),
             details=details,
+            trade_id=trade_id,
         )
         self.events.append(event)
     
@@ -116,7 +145,7 @@ class BacktestEngine:
         # Set backtest run ID for event tracking
         self.backtest_run_id = backtest_run.id
         
-        logger.info(f"Starting backtest with {len(candles)} candles")
+        logger.info(f"Starting backtest run: id={backtest_run.id}, candles={len(candles)}")
         
         # Only start if still pending (might already be RUNNING if use case started it during data fetch)
         # Handle both enum (BacktestStatus.PENDING) and string ('pending') comparisons
@@ -128,92 +157,264 @@ class BacktestEngine:
         
         if is_pending:
             backtest_run.start()
-        
+            
         try:
+            # 0. Pre-process Timestamps (Optimize Speed)
+            # Parse all timestamps once to avoid repeated parsing in loops
+            if candles and isinstance(candles[0]["timestamp"], str):
+                for c in candles:
+                     c["timestamp"] = datetime.fromisoformat(c["timestamp"])
+            
+            # New: Pre-calculation hook for vectorized strategies (single-tf fallback)
+            is_multi_tf = (self.config.signal_timeframe != "1m") or (self.config.condition_timeframes)
+            if not is_multi_tf and hasattr(strategy_func, "pre_calculate"):
+                logger.info("Executing strategy pre-calculation (Vectorized Mode - Single TF)...")
+                try:
+                    strategy_func.pre_calculate(candles)
+                except Exception as e:
+                    logger.error(f"Engine failed to call strategy pre_calculate: {e}")
+            
             # Spec-required: Multi-timeframe processing
-            if self.config.signal_timeframe != "1m":
-                # HTF Signal Mode: Resample 1m → HTF, replay 1m for execution
-                logger.info(f"Multi-timeframe mode: data={self.config.data_timeframe}, signal={self.config.signal_timeframe}")
+            # We enter this block if using HTF signals OR if condition_timeframes are required
+            is_multi_tf = (self.config.signal_timeframe != "1m") or (self.config.condition_timeframes)
+
+            if is_multi_tf:
+                logger.info(f"Multi-timeframe mode active. Signal={self.config.signal_timeframe}, Conditions={self.config.condition_timeframes}")
                 
-                htf_candles = resample_candles_to_htf(candles, self.config.signal_timeframe)
-                total_htf = len(htf_candles)
+                 # 1. Gather all required timeframes
+                required_tfs = set()
+                if self.config.signal_timeframe != "1m":
+                    required_tfs.add(self.config.signal_timeframe)
+                if self.config.condition_timeframes:
+                    required_tfs.update(self.config.condition_timeframes)
+                required_tfs.discard("1m")
+                htf_data_maps = {}
+                htf_intervals = {}
+                htf_candles_for_strategy = {}
                 
-                for htf_idx, htf_candle in enumerate(htf_candles):
-                    # Emit HTF candle closed event
-                    self._emit_event(
-                        BacktestEventType.HTF_CANDLE_CLOSED,
-                        {
-                            "timeframe": self.config.signal_timeframe,
-                            "open": htf_candle["open"],
-                            "high": htf_candle["high"],
-                            "low": htf_candle["low"],
-                            "close": htf_candle["close"],
-                        },
-                        datetime.fromisoformat(htf_candle["timestamp"]) if isinstance(htf_candle["timestamp"], str) else htf_candle["timestamp"],
-                    )
+                from .timeframe_utils import TIMEFRAME_MINUTES
+                for tf in required_tfs:
+                    resampled = resample_candles_to_htf(candles, tf)
+                    htf_candles_for_strategy[tf] = resampled # List for pre_calculate
+                    htf_data_maps[tf] = {}
+                    for c in resampled:
+                         ts = c["timestamp"]
+                         # Normalize to UTC timestamp for reliable comparison
+                         htf_data_maps[tf][int(ts.timestamp())] = c
+                    htf_intervals[tf] = TIMEFRAME_MINUTES[tf]
+                    logger.debug(f"Prepared {len(resampled)} candles for {tf}")
+
+                # New: Pre-calculation hook for vectorized strategies (multi-tf supported)
+                if hasattr(strategy_func, "pre_calculate"):
+                    logger.info("Executing strategy pre-calculation (Vectorized Mode)...")
+                    try:
+                        strategy_func.pre_calculate(candles, htf_candles=htf_candles_for_strategy)
+                    except Exception as e:
+                        logger.error(f"Engine failed to call strategy pre_calculate: {e}")
+
+                # Context State
+                # current_closed_candles: The latest COMPLETE candle for each TF
+                current_closed_candles = {tf: None for tf in required_tfs}
+                # history_containers: Rolling history for each TF
+                history_containers = {tf: [] for tf in required_tfs} 
+
+                # State tracking
+                pending_signal = None 
+                execution_delay_counter = 0
+                last_signal_evaluated_ts = None
+                
+                # Signal TF Interval (if not 1m)
+                signal_tf_interval = None
+                if self.config.signal_timeframe != "1m":
+                     signal_tf_interval = TIMEFRAME_MINUTES[self.config.signal_timeframe]
+
+                total_candles = len(candles)
+                logger.debug(f"Starting Multi-TF loop with {total_candles} 1m candles")
+                
+                # Iterate through ALL 1m candles
+                for idx, m1_candle in enumerate(candles):
+                    self.total_bars_processed += 1
                     
-                    # Generate HTF signal
-                    htf_signal = strategy_func(htf_candle, htf_idx, self.current_position)
+                    # Get candle timestamp
+                    m1_timestamp = m1_candle["timestamp"]
                     
-                    if htf_signal:
-                        self.signals_generated += 1
-                        logger.debug(f"HTF Signal #{self.signals_generated} at HTF idx={htf_idx}: {htf_signal['type']}")
+                    m1_unix = int(m1_timestamp.timestamp())
                     
-                    # Spec3: Get 1m candles from NEXT HTF window for execution (prevent look-ahead)
-                    # Signal generated at HTF close (e.g., 10:00) → execute on 10:00-10:59 candles
-                    htf_timestamp = datetime.fromisoformat(htf_candle["timestamp"]) if isinstance(htf_candle["timestamp"], str) else htf_candle["timestamp"]
-                    execution_1m_candles = get_next_htf_window_candles(candles, htf_timestamp, self.config.signal_timeframe)
-                    
-                    # Edge case: No execution window for last HTF candle
-                    if htf_signal and not execution_1m_candles:
-                        logger.warning(f"No execution window available for HTF signal at {htf_timestamp}, skipping")
-                        continue
-                    
-                    # Process signal on first 1m candle of NEXT window (if we have a signal)
-                    signal_processed = False
-                    
-                    # Replay 1m candles for precision execution and TP/SL checks
-                    for m1_candle in execution_1m_candles:
-                        self.total_bars_processed += 1
+                    # Update Context for ALL TFs
+                    # We check if we just crossed a boundary for any TF
+                    for tf in required_tfs:
+                        interval = htf_intervals[tf]
+                        # Calc which window corresponds to current time
+                        # Usually: floor(time / interval) * interval
+                        # When a window CLOSES, we are in the NEXT window.
+                        current_window_start = (m1_unix // (interval * 60)) * (interval * 60)
                         
-                        # Process HTF signal on first 1m candle of execution window
-                        if htf_signal and not signal_processed:
-                            self._process_signal(htf_signal, m1_candle)
-                            signal_processed = True
+                        # The candle that JUST closed starts at (current - interval)
+                        prev_window_start = current_window_start - (interval * 60)
                         
-                        # Always check SL/TP and update metrics on every 1m candle
-                        if self.current_position:
-                            current_price = Decimal(str(m1_candle["close"]))
-                            self.current_position.update_unrealized_pnl(current_price)
+                        # Check if we have that candle (meaning it just closed or is closed)
+                        if prev_window_start in htf_data_maps[tf]:
+                            cand = htf_data_maps[tf][prev_window_start]
                             
-                            # Track max_drawdown/runup
-                            if self.current_position.unrealized_pnl < self.current_trade_max_drawdown:
-                                self.current_trade_max_drawdown = self.current_position.unrealized_pnl
-                            if self.current_position.unrealized_pnl > self.current_trade_max_runup:
-                                self.current_trade_max_runup = self.current_position.unrealized_pnl
+                            # If this is different from what we knew, it means a new candle closed
+                            # Or we are just initializing
+                            if current_closed_candles[tf] != cand:
+                                current_closed_candles[tf] = cand
+                                history_containers[tf].append(cand)
+                                # Note: No longer capping history to 200. Strategies can access full history.
+
+                    # Determine Trigger
+                    should_trigger = False
+                    trigger_candle = m1_candle # Default to 1m
+                    trigger_idx = idx
+                    
+                    if self.config.signal_timeframe == "1m":
+                        should_trigger = True
+                    else:
+                        # HTF Signal Mode: Only trigger on boundary crossing
+                        # Use the same logic as Context Update, but specifically for Signal TF
+                        interval = signal_tf_interval
+                        current_window_start = (m1_unix // (interval * 60)) * (interval * 60)
+                        prev_window_start = current_window_start - (interval * 60)
+                        
+                        if last_signal_evaluated_ts != prev_window_start and prev_window_start in htf_data_maps[self.config.signal_timeframe]:
+                            should_trigger = True
+                            trigger_candle = htf_data_maps[self.config.signal_timeframe][prev_window_start]
+                            last_signal_evaluated_ts = prev_window_start
+                            trigger_idx = idx # Pass 1m index for pre-calculated indicator lookup
                             
-                            # Check SL/TP
-                            candle_high = Decimal(str(m1_candle.get("high", m1_candle["close"])))
-                            candle_low = Decimal(str(m1_candle.get("low", m1_candle["close"])))
-                            candle_open = Decimal(str(m1_candle.get("open", m1_candle["close"])))
+                            # Emit HTF Candle Event
+                            self._emit_event(
+                                BacktestEventType.HTF_CANDLE_CLOSED,
+                                {
+                                    "timeframe": self.config.signal_timeframe,
+                                    "close": trigger_candle["close"],
+                                    "timestamp": trigger_candle["timestamp"]
+                                },
+                                m1_timestamp
+                            )
+                    
+                    # Generate and Handle Signal
+                    if should_trigger:
+                        # Build Context
+                        # Note: We pass copies to avoid mutation risks if strategy relies on them
+                        ctx = MultiTimeframeContext(
+                            current_candles=current_closed_candles.copy(),
+                            history={k: v[:] for k, v in history_containers.items()} # Shallow copy of lists
+                        )
+                        
+                        htf_signal = strategy_func(trigger_candle, trigger_idx, self.current_position, multi_tf_context=ctx)
+                        
+                        if htf_signal:
+                            self.signals_generated += 1
+                            logger.debug(f"Signal #{self.signals_generated} at {m1_timestamp}: {htf_signal['type']}")
+                            pending_signal = htf_signal
+                    
+                    # Process pending signal with Execution Delay support
+                    if pending_signal:
+                        if self.config.execution_delay_bars > 0:
+                            if execution_delay_counter >= self.config.execution_delay_bars:
+                                self._process_signal(pending_signal, m1_candle)
+                                pending_signal = None
+                                execution_delay_counter = 0
+                            else:
+                                execution_delay_counter += 1
+                        else:
+                            self._process_signal(pending_signal, m1_candle)
+                            pending_signal = None
+                    
+                    # NEW: Call strategy on EVERY 1m candle when position exists
+                    # This allows strategies to react to price changes (e.g., Margin Defense at -70% ROI)
+                    # BEFORE liquidation check happens
+                    if self.current_position and not should_trigger:
+                        # Build context for position management signals
+                        ctx = MultiTimeframeContext(
+                            current_candles=current_closed_candles.copy(),
+                            history={k: v[:] for k, v in history_containers.items()}
+                        )
+                        pos_signal = strategy_func(m1_candle, idx, self.current_position, multi_tf_context=ctx)
+                        if pos_signal:
+                            self.signals_generated += 1
+                            logger.debug(f"Position mgmt signal at {m1_timestamp}: {pos_signal['type']}")
+                            self._process_signal(pos_signal, m1_candle)
+                    
+                    # ALWAYS check SL/TP/Liquidation on EVERY 1m candle (Shared Logic)
+                    if self.current_position:
+                        # ... (Same SL/TP Logic as before) ...
+                        # Define high/low early
+                        candle_high = Decimal(str(m1_candle.get("high", m1_candle["close"])))
+                        candle_low = Decimal(str(m1_candle.get("low", m1_candle["close"])))
+                        candle_open = Decimal(str(m1_candle.get("open", m1_candle["close"])))
+                        current_price = Decimal(str(m1_candle["close"]))
+                        
+                        self.current_position.update_unrealized_pnl(current_price)
+                        
+                         # Track MAE/MFE
+                        if self.current_position.direction == TradeDirection.LONG:
+                            mfe_price = candle_high
+                            mae_price = candle_low
+                        else:
+                            mfe_price = candle_low
+                            mae_price = candle_high
                             
+                        # Calculate unrealized ROE for these extremes (Inline optimization)
+                        def calc_roe(price):
+                            if self.current_position.direction == TradeDirection.LONG:
+                                diff = price - self.current_position.avg_entry_price
+                            else:
+                                diff = self.current_position.avg_entry_price - price
+                            entry_value = self.current_position.avg_entry_price * self.current_position.quantity
+                            if entry_value <= 0: return Decimal("0")
+                            pnl = diff * self.current_position.quantity
+                            initial_margin = entry_value / self.config.leverage
+                            return (pnl / initial_margin) * Decimal("100")
+                            
+                        current_mae_roe = calc_roe(mae_price)
+                        current_mfe_roe = calc_roe(mfe_price)
+                        
+                        if current_mae_roe < self.current_trade_max_drawdown:
+                            self.current_trade_max_drawdown = current_mae_roe
+                        if current_mfe_roe > self.current_trade_max_runup:
+                            self.current_trade_max_runup = current_mfe_roe
+                        
+                        # Update trailing stop
+                        self.current_position.update_trailing_stop(candle_high, candle_low)
+                        
+                        # Liquidation Check
+                        liquidation_result = self._check_liquidation(candle_high, candle_low)
+                        if liquidation_result:
+                            close_price, reason = liquidation_result
+                            logger.warning(f"LIQUIDATION Triggered: {reason}")
+                            self._close_position(price=close_price, timestamp=m1_candle["timestamp"], reason=reason)
+                        else:
+                            # SL/TP Check
                             sl_tp_result = self._check_sl_tp_trailing_with_high_low(candle_high, candle_low, candle_open)
                             if sl_tp_result:
                                 close_price, reason = sl_tp_result
+                                logger.debug(f"SL/TP HIT: {reason}")
                                 self._close_position(
                                     price=close_price,
                                     timestamp=m1_candle["timestamp"],
                                     reason=reason,
+                                    candle_high=candle_high,
+                                    candle_low=candle_low,
+                                    candle_open=candle_open,
                                 )
-                        
-                        # Update equity curve
+                    
+                    # Update Equity Curve
+                    # OPTIMIZATION: Downsample to hourly resolution to save ~25% runtime
+                    if idx % 60 == 0 or idx == len(candles) - 1:
                         self._update_equity_curve(m1_candle["timestamp"], Decimal(str(m1_candle["close"])))
                     
-                    # Progress update per HTF candle
-                    if progress_callback and htf_idx % max(1, int(total_htf / 20)) == 0:
-                        percent = int((htf_idx / total_htf) * 100)
+                    self._check_funding(m1_candle)
+                    
+                    # Progress update
+                    if progress_callback and idx % max(100, int(total_candles / 100)) == 0:
+                        percent = int((idx / total_candles) * 100)
                         backtest_run.update_progress(percent)
                         await progress_callback(percent)
+                    if idx % 100 == 0:
+                        await asyncio.sleep(0)
                 
             else:
                 # Standard 1m processing (original logic)
@@ -236,6 +437,10 @@ class BacktestEngine:
                     # Log every 50 candles
                     if idx % 50 == 0:
                         logger.debug(f"Progress: {idx}/{total_candles} candles | Signals: {self.signals_generated} | Trades: {len(self.trades)}")
+                    
+                    # Yield control to event loop periodically to prevent blocking
+                    if idx % 100 == 0:
+                        await asyncio.sleep(0)
             
             # Close any open position
             if self.current_position:
@@ -265,8 +470,9 @@ class BacktestEngine:
                 final_equity=self.equity,
                 peak_equity=self.peak_equity,
                 metrics=metrics,  # Changed from performance_metrics
-                equity_curve=self.equity_curve,
+                equity_curve=self._downsample_equity_curve(self.equity_curve),
                 trades=self.trades,
+                events=self.events,
             )
             
             backtest_run.complete(results)
@@ -293,18 +499,49 @@ class BacktestEngine:
         # Check Funding Fee
         self._check_funding(candle)
         
+        # Define high/low early for use in all checks
+        candle_high = Decimal(str(candle.get("high", candle["close"])))
+        candle_low = Decimal(str(candle.get("low", candle["close"])))
+
         if self.current_position:
             self.current_position.update_unrealized_pnl(current_price)
             
-            # Spec-required: Track intra-trade max drawdown and runup
-            if self.current_position.unrealized_pnl < self.current_trade_max_drawdown:
-                self.current_trade_max_drawdown = self.current_position.unrealized_pnl
-            if self.current_position.unrealized_pnl > self.current_trade_max_runup:
-                self.current_trade_max_runup = self.current_position.unrealized_pnl
+            # Track MAE/MFE (Max Adverse/Favorable Excursion) with 1m precision (ROE Percentage)
+            # We use candle_high and candle_low for intra-minute extreme capture
+            if self.current_position.direction == TradeDirection.LONG:
+                mfe_price = candle_high
+                mae_price = candle_low
+            else:
+                mfe_price = candle_low
+                mae_price = candle_high
+                
+            def calc_roe(price):
+                if self.current_position.direction == TradeDirection.LONG:
+                    diff = price - self.current_position.avg_entry_price
+                else:
+                    diff = self.current_position.avg_entry_price - price
+                
+                # Leverage-adjusted ROE (Return on Margin)
+                pnl = diff * self.current_position.quantity
+                entry_value = self.current_position.avg_entry_price * self.current_position.quantity
+                
+                if entry_value <= 0:
+                    return Decimal("0")
+                
+                # Formula: (pnl / (notional / leverage)) * 100
+                leverage = Decimal(str(self.config.leverage))
+                return (pnl / (entry_value / leverage)) * Decimal("100")
+                
+            current_mae_roe = calc_roe(mae_price)
+            current_mfe_roe = calc_roe(mfe_price)
+            
+            if current_mae_roe < self.current_trade_max_drawdown:
+                self.current_trade_max_drawdown = current_mae_roe
+            if current_mfe_roe > self.current_trade_max_runup:
+                self.current_trade_max_runup = current_mfe_roe
             
             # Level 2 SL/TP Check: Use High/Low prices for more accurate simulation
-            candle_high = Decimal(str(candle.get("high", candle["close"])))
-            candle_low = Decimal(str(candle.get("low", candle["close"])))
+            # (Variables already defined above)
             
             # Update trailing stop (must happen BEFORE checking if triggered)
             self.current_position.update_trailing_stop(candle_high, candle_low)
@@ -332,6 +569,9 @@ class BacktestEngine:
                     price=close_price,
                     timestamp=candle["timestamp"],
                     reason=reason,
+                    candle_low=candle_low,
+                    candle_high=candle_high,
+                    candle_open=candle_open,
                 )
                 return
         
@@ -346,6 +586,14 @@ class BacktestEngine:
         # Update equity curve
         self._update_equity_curve(candle["timestamp"], current_price)
     
+    def _downsample_equity_curve(self, equity_curve: List[EquityCurvePoint], max_points: int = 5000) -> List[EquityCurvePoint]:
+        """Downsample equity curve to avoid database overload."""
+        if not equity_curve or len(equity_curve) <= max_points:
+            return equity_curve
+            
+        step = len(equity_curve) / max_points
+        return [equity_curve[int(i * step)] for i in range(max_points)]
+
     def _process_signal(self, signal: Dict, candle: Dict) -> None:
         """Process trading signal from strategy.
         
@@ -360,6 +608,7 @@ class BacktestEngine:
         - reduce_short: Reduce SHORT by quantity
         - flip_long: Close SHORT and open LONG
         - flip_short: Close LONG and open SHORT
+        - update_levels: Update SL/TP/Trailing for existing position
         """
         signal_type = signal.get("type")
         signal_quantity = signal.get("quantity")  # Optional quantity override
@@ -367,22 +616,59 @@ class BacktestEngine:
         timestamp = candle["timestamp"]
         
         # === OPEN NEW POSITIONS (from flat) ===
-        if signal_type in ("open_long", "buy") and not self.current_position:
-            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal)
+        if signal_type in ("open_long", "buy", "ENTRY_LONG") and not self.current_position:
+            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal, candle=candle)
         
-        elif signal_type in ("open_short", "sell") and not self.current_position:
-            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal)
+        elif signal_type in ("open_short", "sell", "ENTRY_SHORT") and not self.current_position:
+            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal, candle=candle)
         
         # === ADD TO EXISTING POSITIONS (scale in) ===
         elif signal_type == "add_long" and self._is_long():
-            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity)
+            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity, signal=signal)
         
         elif signal_type == "add_short" and self._is_short():
-            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity)
+            self._add_to_position(price=current_price, timestamp=timestamp, quantity=signal_quantity, signal=signal)
+        
+        # === UPDATE TP/SL/TRAILING ===
+        elif signal_type == "update_levels" and self.current_position:
+            # Update stop loss if provided
+            if "stop_loss" in signal:
+                new_sl = signal["stop_loss"]
+                self.current_position.stop_loss = Decimal(str(new_sl)) if new_sl is not None else None
+                logger.debug(f"Updated SL to {self.current_position.stop_loss}")
+            
+            # Update take profit if provided
+            if "take_profit" in signal:
+                new_tp = signal["take_profit"]
+                self.current_position.take_profit = Decimal(str(new_tp)) if new_tp is not None else None
+                logger.debug(f"Updated TP to {self.current_position.take_profit}")
+            
+            # Update trailing stop if provided
+            if "trailing_stop_percent" in signal:
+                new_trailing = signal["trailing_stop_percent"]
+                self.current_position.trailing_stop_percent = Decimal(str(new_trailing)) if new_trailing is not None else None
+                logger.debug(f"Updated Trailing Stop to {self.current_position.trailing_stop_percent}%")
+            
+            # Emit LEVELS_UPDATED event
+            self._emit_event(
+                event_type=BacktestEventType.LEVELS_UPDATED,
+                details={
+                    "stop_loss": float(self.current_position.stop_loss) if self.current_position.stop_loss else None,
+                    "take_profit": float(self.current_position.take_profit) if self.current_position.take_profit else None,
+                    "trailing_stop_percent": float(self.current_position.trailing_stop_percent) if self.current_position.trailing_stop_percent else None,
+                    "reason": "Signal Update"
+                },
+                timestamp=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+                trade_id=self.current_position.id if hasattr(self.current_position, 'id') else None
+            )
+        
+        # === UPDATE MARGIN ===
+        elif signal_type == "update_margin" and self.current_position:
+            self._update_margin(signal, timestamp)
         
         # === CLOSE ENTIRE POSITION ===
-        elif signal_type in ("close_position", "close") and self.current_position:
-            reason = signal.get("metadata") or "Signal close"
+        elif signal_type in ("close_position", "close", "EXIT_LONG", "EXIT_SHORT") and self.current_position:
+            reason = signal.get("metadata", {}).get("reason") if isinstance(signal.get("metadata"), dict) else (signal.get("metadata") or "Signal close")
             self._close_position(price=current_price, timestamp=timestamp, reason=reason)
         
         # === PARTIAL CLOSE / REDUCE ===
@@ -402,11 +688,11 @@ class BacktestEngine:
         elif signal_type == "flip_long" and self._is_short():
             reason = signal.get("metadata") or "Flip to LONG"
             self._close_position(price=current_price, timestamp=timestamp, reason=reason)
-            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal)
+            self._open_long_position(price=current_price, timestamp=timestamp, signal=signal, candle=candle)
         
         elif signal_type == "flip_short" and self._is_long():
             self._close_position(price=current_price, timestamp=timestamp, reason="Flip to SHORT")
-            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal)
+            self._open_short_position(price=current_price, timestamp=timestamp, signal=signal, candle=candle)
     
     def _is_long(self) -> bool:
         """Check if current position is LONG."""
@@ -421,19 +707,39 @@ class BacktestEngine:
         price: Decimal,
         timestamp: str,
         signal: Dict,
+        candle: Dict = None,  # Added: candle data for limit order fill detection
     ) -> None:
         """Open long position."""
         
-        # Calculate position size
-        quantity = self._calculate_position_size(price)
+        if signal.get("quantity") and float(signal["quantity"]) > 0:
+            quantity = Decimal(str(signal["quantity"]))
+            sizing_source = "STRATEGY"
+        else:
+            quantity = self._calculate_position_size(price)
+            sizing_source = "ENGINE"
         
-        # Simulate LONG entry
-        print(f"DEBUG: Processing Signal in _open_long_position: {signal}")
+        # Extract limit price from signal if provided
+        limit_price = signal.get("limit_price")
+        if limit_price is not None:
+            limit_price = Decimal(str(limit_price))
+        
+        # Extract candle high/low for limit order fill detection
+        candle_low = None
+        candle_high = None
+        if candle:
+            candle_low = Decimal(str(candle.get("low", price)))
+            candle_high = Decimal(str(candle.get("high", price)))
+        
+        # Simulate LONG entry (supports both market and limit orders)
+        # print(f"DEBUG: Processing Signal (MODIFIED_TEST): {signal}")
         fill = self.market_simulator.simulate_long_entry(
             symbol=self.config.symbol,
             quantity=quantity,
             current_price=price,
             timestamp=timestamp,
+            limit_price=limit_price,
+            candle_low=candle_low,
+            candle_high=candle_high,
         )
         
         # Override commission with Taker Fee
@@ -443,19 +749,62 @@ class BacktestEngine:
         if fill.filled_quantity == 0:
             return  # Order not filled
         
+        leverage = Decimal(str(self.config.leverage))
+        margin_value = (fill.filled_price * fill.filled_quantity) / leverage
+        
         # Create position
         self.current_position = BacktestPosition(
             symbol=self.config.symbol,
             direction=TradeDirection.LONG,
             quantity=fill.filled_quantity,
             avg_entry_price=fill.filled_price,
+            initial_entry_price=fill.filled_price,  # Store initial entry
+            initial_quantity=fill.filled_quantity,  # Store initial quantity
+            isolated_margin=margin_value, # Set initial isolated margin
         )
-        # Store stop loss/take profit separately if needed
-        self.current_position.stop_loss = signal.get("stop_loss")
-        self.current_position.take_profit = signal.get("take_profit")
+        # Store stop loss/take profit from signal (if provided)
+        provided_sl = signal.get("stop_loss")
+        provided_tp = signal.get("take_profit")
+        provided_sl_pct = signal.get("stop_loss_percent")
+        provided_tp_pct = signal.get("take_profit_percent")
+        
+        leverage = Decimal(str(self.config.leverage))
+        
+        # ROI-based SL/TP Conversion
+        if provided_sl_pct is not None:
+            # LONG SL: Price = Entry * (1 - (ROI_Pct / 100 / Leverage))
+            # ROI is positive magnitude, but we subtract for SL
+            sl_roi = Decimal(str(provided_sl_pct))
+            self.current_position.stop_loss = fill.filled_price * (Decimal("1") - (sl_roi / Decimal("100") / leverage))
+        elif provided_sl:
+            self.current_position.stop_loss = Decimal(str(provided_sl))
+            
+        if provided_tp_pct is not None:
+            # LONG TP: Price = Entry * (1 + (ROI_Pct / 100 / Leverage))
+            tp_roi = Decimal(str(provided_tp_pct))
+            self.current_position.take_profit = fill.filled_price * (Decimal("1") + (tp_roi / Decimal("100") / leverage))
+        elif provided_tp:
+            self.current_position.take_profit = Decimal(str(provided_tp))
+            
         self.current_position.entry_time = timestamp
         self.current_position.entry_commission = fill.commission
-        self.current_position.metadata = signal.get("metadata", signal.get("reason"))
+        
+        # Prepare Metadata (Ensure it's a Dict)
+        raw_metadata = signal.get("metadata", signal.get("reason"))
+        if isinstance(raw_metadata, dict):
+            metadata = raw_metadata.copy()
+        elif isinstance(raw_metadata, str):
+            metadata = {"reason": raw_metadata}
+        else:
+            metadata = {}
+            
+        metadata["sizing_source"] = sizing_source
+        metadata["initial_margin"] = float(margin_value)
+        metadata["current_margin"] = float(margin_value)
+        
+        self.current_position.metadata = metadata
+        
+        logger.debug(f"POSITION OPENED: TP={self.current_position.take_profit}, SL={self.current_position.stop_loss}, Entry={self.current_position.avg_entry_price}, Source={sizing_source}")
         
         # Spec-required: Initialize trade tracking
         self.current_trade_signal_time = timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp)
@@ -480,6 +829,7 @@ class BacktestEngine:
                 "fill_conditions": fill.fill_conditions_met,
             },
             timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            trade_id=self.current_position.id
         )
         
         logger.debug(f"Opened LONG: {fill.filled_quantity} @ {fill.filled_price}")
@@ -489,18 +839,38 @@ class BacktestEngine:
         price: Decimal,
         timestamp: str,
         signal: Dict,
+        candle: Dict = None,  # Added: candle data for limit order fill detection
     ) -> None:
         """Open short position."""
         
-        # Calculate position size
-        quantity = self._calculate_position_size(price)
+        if signal.get("quantity") and float(signal["quantity"]) > 0:
+            quantity = Decimal(str(signal["quantity"]))
+            sizing_source = "STRATEGY"
+        else:
+            quantity = self._calculate_position_size(price)
+            sizing_source = "ENGINE"
         
-        # Simulate SHORT entry
+        # Extract limit price from signal if provided
+        limit_price = signal.get("limit_price")
+        if limit_price is not None:
+            limit_price = Decimal(str(limit_price))
+        
+        # Extract candle high/low for limit order fill detection
+        candle_low = None
+        candle_high = None
+        if candle:
+            candle_low = Decimal(str(candle.get("low", price)))
+            candle_high = Decimal(str(candle.get("high", price)))
+        
+        # Simulate SHORT entry (supports both market and limit orders)
         fill = self.market_simulator.simulate_short_entry(
             symbol=self.config.symbol,
             quantity=quantity,
             current_price=price,
             timestamp=timestamp,
+            limit_price=limit_price,
+            candle_low=candle_low,
+            candle_high=candle_high,
         )
         
         # Override commission with Taker Fee
@@ -510,36 +880,105 @@ class BacktestEngine:
         if fill.filled_quantity == 0:
             return
         
+        leverage = Decimal(str(self.config.leverage))
+        margin_value = (fill.filled_price * fill.filled_quantity) / leverage
+
         # Create position
         self.current_position = BacktestPosition(
             symbol=self.config.symbol,
             direction=TradeDirection.SHORT,
             quantity=fill.filled_quantity,
             avg_entry_price=fill.filled_price,
+            initial_entry_price=fill.filled_price,  # Store initial entry
+            initial_quantity=fill.filled_quantity,  # Store initial quantity
+            isolated_margin=margin_value, # Set initial isolated margin
         )
-        # Store stop loss/take profit separately if needed
-        self.current_position.stop_loss = signal.get("stop_loss")
-        self.current_position.take_profit = signal.get("take_profit")
+        # Store stop loss/take profit from signal (if provided)
+        provided_sl = signal.get("stop_loss")
+        provided_tp = signal.get("take_profit")
+        provided_sl_pct = signal.get("stop_loss_percent")
+        provided_tp_pct = signal.get("take_profit_percent")
+        
+        leverage = Decimal(str(self.config.leverage))
+        
+        # ROI-based SL/TP Conversion (SHORT)
+        if provided_sl_pct is not None:
+            # SHORT SL: Price = Entry * (1 + (ROI_Pct / 100 / Leverage))
+            # SL is ABOVE entry for SHORT
+            sl_roi = Decimal(str(provided_sl_pct))
+            self.current_position.stop_loss = fill.filled_price * (Decimal("1") + (sl_roi / Decimal("100") / leverage))
+            
+        elif provided_sl:
+            self.current_position.stop_loss = Decimal(str(provided_sl))
+            
+        if provided_tp_pct is not None:
+            # SHORT TP: Price = Entry * (1 - (ROI_Pct / 100 / Leverage))
+            tp_roi = Decimal(str(provided_tp_pct))
+            self.current_position.take_profit = fill.filled_price * (Decimal("1") - (tp_roi / Decimal("100") / leverage))
+            
+        elif provided_tp:
+            self.current_position.take_profit = Decimal(str(provided_tp))
+            
         self.current_position.entry_time = timestamp
         self.current_position.entry_commission = fill.commission
-        self.current_position.metadata = signal.get("metadata", signal.get("reason"))
+        
+        # Prepare Metadata (Ensure it's a Dict)
+        raw_metadata = signal.get("metadata", signal.get("reason"))
+        if isinstance(raw_metadata, dict):
+            metadata = raw_metadata.copy()
+        elif isinstance(raw_metadata, str):
+            metadata = {"reason": raw_metadata}
+        else:
+            metadata = {}
+            
+        metadata["sizing_source"] = sizing_source
+        metadata["initial_margin"] = float(margin_value)
+        metadata["current_margin"] = float(margin_value)
+        
+        self.current_position.metadata = metadata
+            
+        logger.debug(f"POSITION OPENED: TP={self.current_position.take_profit}, SL={self.current_position.stop_loss}, Entry={self.current_position.avg_entry_price}, Source={sizing_source}")
         
         # Note: Don't modify equity when opening position
         # Equity will be updated when position is closed with realized PnL
         
         logger.debug(f"Opened SHORT: {fill.filled_quantity} @ {fill.filled_price}")
+        
+        # Emit event
+        self._emit_event(
+            BacktestEventType.TRADE_OPENED,
+            {
+                "direction": "SHORT",
+                "price": float(fill.filled_price),
+                "quantity": float(fill.filled_quantity),
+                "stop_loss": float(self.current_position.stop_loss) if self.current_position.stop_loss else None,
+                "take_profit": float(self.current_position.take_profit) if self.current_position.take_profit else None,
+                "commission": float(fill.commission),
+                "fill_conditions": fill.fill_conditions_met,
+            },
+            timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            trade_id=self.current_position.id
+        )
     
     def _close_position(
         self,
         price: Decimal,
         timestamp: str,
         reason: Union[str, Dict[str, Any]],
+        candle_low: Optional[Decimal] = None,
+        candle_high: Optional[Decimal] = None,
+        candle_open: Optional[Decimal] = None,
     ) -> None:
         """Close current position and record trade."""
-        
         if not self.current_position:
             return
         
+        # Prepare reason string for policy check
+        if isinstance(reason, dict):
+            r_str = str(reason.get("reason", "")).lower()
+        else:
+            r_str = str(reason).lower()
+            
         # Simulate position exit
         if self.current_position.direction == TradeDirection.LONG:
             # Closing LONG = SHORT entry action
@@ -548,6 +987,10 @@ class BacktestEngine:
                 quantity=self.current_position.quantity,
                 current_price=price,
                 timestamp=timestamp,
+                limit_price=price if "take profit" in r_str or "tp" in r_str or "stop loss" in r_str or "sl" in r_str else None,
+                candle_low=candle_low,
+                candle_high=candle_high,
+                candle_open=candle_open,
             )
         else:
             # Closing SHORT = LONG entry action
@@ -556,15 +999,14 @@ class BacktestEngine:
                 quantity=self.current_position.quantity,
                 current_price=price,
                 timestamp=timestamp,
+                limit_price=price if "take profit" in r_str or "tp" in r_str or "stop loss" in r_str or "sl" in r_str else None,
+                candle_low=candle_low,
+                candle_high=candle_high,
+                candle_open=candle_open,
             )
             
         # Override commission based on Maker/Taker
         is_maker = False
-        if isinstance(reason, dict):
-            r_str = str(reason.get("reason", "")).lower()
-        else:
-            r_str = str(reason).lower()
-            
         if "take profit" in r_str or "tp" in r_str:
             is_maker = True
             
@@ -586,14 +1028,34 @@ class BacktestEngine:
         
         # Calculate total costs (entry + exit commissions)
         entry_commission = getattr(self.current_position, 'entry_commission', Decimal("0"))
-        total_costs = entry_commission + fill.commission + fill.slippage
+        funding_fee = getattr(self.current_position, 'accumulated_funding', Decimal("0"))
+        
+        total_costs = entry_commission + fill.commission + fill.slippage + funding_fee
         net_pnl = pnl - total_costs
         
+        # Calculate Fee Breakdown
+        # Entry assumed Taker (default engine behavior)
+        taker_fee = entry_commission
+        maker_fee = Decimal("0")
+        
+        if is_maker:
+            maker_fee += fill.commission
+        else:
+            taker_fee += fill.commission
+            
         # Update equity with net P&L
         self.equity += net_pnl
         
         entry_value = self.current_position.avg_entry_price * fill.filled_quantity
-        pnl_percent = (net_pnl / entry_value) * Decimal("100") if entry_value > 0 else Decimal("0")
+        # ROI calculation (Binance Style: Return on Margin)
+        # ROI% = (Net PnL / Initial Margin) * 100
+        # Initial Margin = Notional / Leverage
+        if entry_value > 0:
+            leverage = Decimal(str(self.config.leverage)) if self.config.leverage else Decimal("1")
+            initial_margin = entry_value / leverage
+            pnl_percent = (net_pnl / initial_margin) * Decimal("100")
+        else:
+            pnl_percent = Decimal("0")
         
         # Normalize exit reason to dict
         exit_reason_dict = reason if isinstance(reason, dict) else {"reason": reason}
@@ -606,20 +1068,25 @@ class BacktestEngine:
 
         # Create trade record
         trade = BacktestTrade(
+            id=self.current_position.id,
             symbol=self.config.symbol,
             direction=self.current_position.direction,
-            entry_price=self.current_position.avg_entry_price,
-            exit_price=fill.filled_price,
-            entry_quantity=fill.filled_quantity,
             entry_time=entry_time_dt,
+            entry_price=self.current_position.avg_entry_price,
+            entry_quantity=fill.filled_quantity,
+            entry_commission=entry_commission,
+            entry_slippage=Decimal("0"), 
+            # Initial entry tracking
+            initial_entry_price=getattr(self.current_position, 'initial_entry_price', self.current_position.avg_entry_price),
+            initial_entry_quantity=getattr(self.current_position, 'initial_quantity', fill.filled_quantity),
             exit_time=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            exit_price=fill.filled_price,
+            exit_quantity=fill.filled_quantity,
+            exit_commission=fill.commission,
+            exit_slippage=fill.slippage,
             gross_pnl=pnl,
             net_pnl=net_pnl,
             pnl_percent=pnl_percent,
-            entry_commission=Decimal("0"),
-            exit_commission=fill.commission,
-            entry_slippage=Decimal("0"), 
-            exit_slippage=fill.slippage,
             entry_reason=getattr(self.current_position, 'metadata', None),
             exit_reason=exit_reason_dict,
             # Spec-required fields
@@ -627,14 +1094,26 @@ class BacktestEngine:
             execution_delay_seconds=execution_delay_seconds,
             max_drawdown=self.current_trade_max_drawdown,
             max_runup=self.current_trade_max_runup,
+            mae=self.current_trade_max_drawdown, 
+            mfe=self.current_trade_max_runup,   
             fill_policy_used=self.current_trade_fill_policy,
             fill_conditions_met=self.current_trade_fill_conditions,
+            # Fee Breakdown
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            funding_fee=funding_fee
         )
         print(f"DEBUG: Created BacktestTrade with exit_reason: {trade.exit_reason}")
         # Trade is complete - no need to call close()
         
         self.trades.append(trade)
         self.current_position = None
+        
+        # Reset intra-trade extremes
+        if hasattr(self, 'current_trade_min_price'):
+            delattr(self, 'current_trade_min_price')
+        if hasattr(self, 'current_trade_max_price'):
+            delattr(self, 'current_trade_max_price')
         
         # Emit TRADE_CLOSED event
         exit_event_type = BacktestEventType.TRADE_CLOSED
@@ -660,6 +1139,7 @@ class BacktestEngine:
                 "max_runup": float(self.current_trade_max_runup),
             },
             timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            trade_id=trade.id
         )
         
         # Spec-required: Reset tracking variables
@@ -680,6 +1160,7 @@ class BacktestEngine:
         price: Decimal,
         timestamp: str,
         quantity: Optional[Decimal] = None,
+        signal: Optional[Dict] = None,
     ) -> None:
         """Add to existing position (scale in / average in).
         
@@ -727,10 +1208,69 @@ class BacktestEngine:
         self.current_position.avg_entry_price = new_avg_price
         self.current_position.entry_commission += fill.commission
         
+        # PROPAGATE TP/SL UPDATES IF PROVIDED IN SIGNAL
+        if signal:
+            leverage = Decimal(str(self.config.leverage))
+            
+            # SL Updates
+            if "stop_loss_percent" in signal:
+                sl_roi = Decimal(str(signal["stop_loss_percent"]))
+                if self.current_position.direction == TradeDirection.LONG:
+                    self.current_position.stop_loss = self.current_position.avg_entry_price * (Decimal("1") - (sl_roi / Decimal("100") / leverage))
+                else:
+                    self.current_position.stop_loss = self.current_position.avg_entry_price * (Decimal("1") + (sl_roi / Decimal("100") / leverage))
+                logger.debug(f"Scale-in updated SL (ROI%): {self.current_position.stop_loss}")
+            elif "stop_loss" in signal:
+                sl = signal["stop_loss"]
+                self.current_position.stop_loss = Decimal(str(sl)) if sl is not None else self.current_position.stop_loss
+                logger.debug(f"Scale-in updated SL: {self.current_position.stop_loss}")
+            
+            # TP Updates
+            if "take_profit_percent" in signal:
+                tp_roi = Decimal(str(signal["take_profit_percent"]))
+                if self.current_position.direction == TradeDirection.LONG:
+                    self.current_position.take_profit = self.current_position.avg_entry_price * (Decimal("1") + (tp_roi / Decimal("100") / leverage))
+                else:
+                    self.current_position.take_profit = self.current_position.avg_entry_price * (Decimal("1") - (tp_roi / Decimal("100") / leverage))
+                logger.debug(f"Scale-in updated TP (ROI%): {self.current_position.take_profit}")
+            elif "take_profit" in signal:
+                tp = signal["take_profit"]
+                self.current_position.take_profit = Decimal(str(tp)) if tp is not None else self.current_position.take_profit
+                logger.debug(f"Scale-in updated TP: {self.current_position.take_profit}")
+
+            if "trailing_stop_percent" in signal:
+                trail = signal["trailing_stop_percent"]
+                self.current_position.trailing_stop_percent = Decimal(str(trail)) if trail is not None else self.current_position.trailing_stop_percent
+                logger.debug(f"Scale-in updated TR: {self.current_position.trailing_stop_percent}")
+
+        # Update Margin in Metadata
+        if self.current_position.metadata is None:
+            self.current_position.metadata = {}
+        
+        leverage = Decimal(str(self.config.leverage))
+        current_margin = (self.current_position.avg_entry_price * self.current_position.quantity) / leverage
+        self.current_position.metadata["current_margin"] = float(current_margin)
+
+        # Emit scale-in event
+        self._emit_event(
+            event_type=BacktestEventType.SCALE_IN,
+            details={
+                "price": float(fill.filled_price),
+                "quantity": float(fill.filled_quantity),
+                "total_qty": float(total_qty),
+                "new_avg_price": float(new_avg_price),
+                "commission": float(fill.commission),
+                "reason": "Scale In"
+            },
+            timestamp=fill.fill_time if isinstance(fill.fill_time, datetime) else (datetime.fromisoformat(fill.fill_time) if isinstance(fill.fill_time, str) else datetime.utcnow()),
+            trade_id=self.current_position.id if hasattr(self.current_position, 'id') else None
+        )
+
         logger.debug(
             f"Added to {self.current_position.direction.value}: "
             f"+{fill.filled_quantity} @ {fill.filled_price}, "
-            f"total qty: {total_qty}, avg price: {new_avg_price}"
+            f"total qty: {total_qty}, avg price: {new_avg_price}, "
+            f"new margin: {current_margin}"
         )
     
     def _partial_close(
@@ -822,6 +1362,20 @@ class BacktestEngine:
         )
         self.trades.append(partial_trade)
         
+        # Emit partial close event
+        self._emit_event(
+            event_type=BacktestEventType.PARTIAL_CLOSE,
+            details={
+                "price": float(fill.filled_price),
+                "quantity": float(fill.filled_quantity),
+                "remaining_qty": float(self.current_position.quantity - fill.filled_quantity),
+                "pnl": float(net_pnl),
+                "reason": exit_reason_dict.get("reason", "Partial Close")
+            },
+            timestamp=fill.fill_time if isinstance(fill.fill_time, datetime) else (datetime.fromisoformat(fill.fill_time) if isinstance(fill.fill_time, str) else datetime.utcnow()),
+            trade_id=self.current_position.id if hasattr(self.current_position, 'id') else None
+        )
+        
         # Update remaining position
         self.current_position.quantity -= fill.filled_quantity
         self.current_position.entry_commission -= entry_commission
@@ -863,50 +1417,122 @@ class BacktestEngine:
             funding_fee = position_value * (self.config.funding_rate_daily / Decimal("3"))
             
             # Deduction logic:
-            # If Rate > 0: Long Pays Short. (Long loses equity).
-            # If Rate < 0: Short Pays Long. (Long gains equity).
+            # Rate > 0: Long Pays (Cost), Short Receives (Rebate)
+            # Rate < 0: Short Pays (Cost), Long Receives (Rebate)
             
-            # Simplified: Assuming standard Positive funding market
+            actual_cost = Decimal("0")
+            
             if self.current_position.direction == TradeDirection.LONG:
                 if self.config.funding_rate_daily > 0:
-                    self.equity -= funding_fee
-                    logger.debug(f"Funding Fee Paid: -{funding_fee:.2f}")
+                    actual_cost = funding_fee
                 else:
-                    self.equity += abs(funding_fee)
+                    actual_cost = -abs(funding_fee)
             else: # SHORT
                 if self.config.funding_rate_daily > 0:
-                    self.equity += funding_fee
-                    logger.debug(f"Funding Fee Received: +{funding_fee:.2f}")
+                    actual_cost = -funding_fee
                 else:
-                    self.equity -= abs(funding_fee)
+                    actual_cost = abs(funding_fee)
+
+            self.equity -= actual_cost
+            if hasattr(self.current_position, 'accumulated_funding'):
+                self.current_position.accumulated_funding += actual_cost
+            
+            if actual_cost > 0:
+                logger.debug(f"Funding Fee Paid: {actual_cost:.2f}")
+            else:
+                logger.debug(f"Funding Fee Received: {abs(actual_cost):.2f}")
+
+    def _update_margin(self, signal: Dict, timestamp: Any) -> None:
+        """Update isolated margin for current position."""
+        if not self.current_position:
+            return
+            
+        amount = Decimal(str(signal.get("amount", "0")))
+        if amount == 0:
+            return
+            
+        # Check if adding or removing
+        if amount > 0:
+            # Adding margin: check if enough equity
+            if self.equity < amount:
+                logger.warning(f"Insufficient equity to add margin: {self.equity} < {amount}")
+                return
+            
+            self.equity -= amount
+            self.current_position.isolated_margin += amount
+            action = "ADDED"
+        else:
+            # Removing margin: careful check
+            # For backtest, we allow removal if remaining margin >= initial required margin
+            # (or simply if it doesn't cause immediate liquidation)
+            # Conservative rule: must have at least initial margin
+            
+            abs_amount = abs(amount)
+            if self.current_position.isolated_margin < abs_amount:
+                logger.warning(f"Insufficient isolated margin to remove: {self.current_position.isolated_margin} < {abs_amount}")
+                return
+                
+            self.equity += abs_amount
+            self.current_position.isolated_margin -= abs_amount
+            action = "REMOVED"
+            
+        # Log and Emit event
+        logger.info(f"MARGIN {action}: {abs(amount)} | New Isolated Margin: {self.current_position.isolated_margin}")
+        
+        if self.current_position.metadata is None:
+            self.current_position.metadata = {}
+        self.current_position.metadata["current_margin"] = float(self.current_position.isolated_margin)
+        
+        self._emit_event(
+            event_type=BacktestEventType.MARGIN_UPDATED,
+            details={
+                "action": action,
+                "amount": float(abs(amount)),
+                "new_margin": float(self.current_position.isolated_margin),
+                "reason": signal.get("metadata", {}).get("reason", "Manual Update") if isinstance(signal.get("metadata"), dict) else (signal.get("metadata") or "Manual Update")
+            },
+            timestamp=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(timestamp),
+            trade_id=self.current_position.id
+        )
+        
+        # ALSO update levels if provided in the same signal
+        if "stop_loss" in signal:
+            self.current_position.stop_loss = Decimal(str(signal["stop_loss"]))
+            logger.info(f"SL updated during margin update to {self.current_position.stop_loss}")
+            
+        if "take_profit" in signal:
+            self.current_position.take_profit = Decimal(str(signal["take_profit"]))
+            logger.info(f"TP updated during margin update to {self.current_position.take_profit}")
 
     def _check_liquidation(self, candle_high: Decimal, candle_low: Decimal) -> Optional[tuple]:
-        """Check if position is liquidated based on leverage."""
+        """Check if position is liquidated based on leverage and margin."""
         if not self.current_position:
-            return None
-            
-        if self.config.leverage <= 1:
             return None
             
         pos = self.current_position
         # Maintenance Margin Rate (0.5%)
         maintenance_rate = Decimal("0.005")
-        leverage = Decimal(self.config.leverage)
         
-        # Calculate Liquidation Price automatically
-        # Long Liq = Entry * (1 - 1/Lev + Maint)
-        # Short Liq = Entry * (1 + 1/Lev - Maint)
+        # Calculate Liquidation Price based on Isolated Margin
+        # Long Pliq = Pentry * (1 + MMR) - Misc / Q
+        # Short Pliq = Pentry * (1 - MMR) + Misc / Q
+        
+        # We also need to consider the initial margin from equity if isolated_margin is not set?
+        # But we initialized it in _open methods.
         
         if pos.direction == TradeDirection.LONG:
-            liq_price = pos.avg_entry_price * (Decimal("1") - (Decimal("1")/leverage) + maintenance_rate)
-            if candle_low <= liq_price:
-                # Ensure we don't return negative price
-                return (max(Decimal("0"), liq_price), "LIQUIDATION")
+            # P_liq = P_entry * (1 + MMR) - M_iso / Q
+            liq_price = pos.avg_entry_price * (Decimal("1") + maintenance_rate) - (pos.isolated_margin / pos.quantity)
+            pos.liquidation_price = max(Decimal("0"), liq_price)
+            if candle_low <= pos.liquidation_price:
+                return (pos.liquidation_price, "LIQUIDATION")
                 
         else: # SHORT
-            liq_price = pos.avg_entry_price * (Decimal("1") + (Decimal("1")/leverage) - maintenance_rate)
-            if candle_high >= liq_price:
-                return (liq_price, "LIQUIDATION")
+            # P_liq = P_entry * (1 - MMR) + M_iso / Q
+            liq_price = pos.avg_entry_price * (Decimal("1") - maintenance_rate) + (pos.isolated_margin / pos.quantity)
+            pos.liquidation_price = liq_price
+            if candle_high >= pos.liquidation_price:
+                return (pos.liquidation_price, "LIQUIDATION")
                 
         return None
 
@@ -943,10 +1569,21 @@ class BacktestEngine:
         if self.current_position.direction == TradeDirection.LONG:
             # LONG: SL/Trailing triggers on Low, TP triggers on High
             
+            # Use configured limit fill policy
+            is_cross = self.config.limit_fill_policy in ("cross", "cross_volume")
+            
             # Determine which can trigger
-            sl_triggered = stop_loss and candle_low <= stop_loss
-            trailing_triggered = trailing_stop and candle_low <= trailing_stop
-            tp_triggered = take_profit and candle_high >= take_profit
+            if is_cross and candle_open:
+                # Cross: Require price to move THROUGH the level or gap past it
+                sl_triggered = stop_loss and ((candle_open > stop_loss and candle_low < stop_loss) or (candle_open < stop_loss))
+                trailing_triggered = trailing_stop and ((candle_open > trailing_stop and candle_low < trailing_stop) or (candle_open < trailing_stop))
+                tp_triggered = take_profit and ((candle_open < take_profit and candle_high > take_profit) or (candle_open > take_profit))
+            else:
+                # Touch: (Standard/Default)
+                # SL/TP Checks (LONG)
+                sl_triggered = stop_loss and candle_low <= stop_loss
+                trailing_triggered = trailing_stop and candle_low <= trailing_stop
+                tp_triggered = take_profit and candle_high >= take_profit
             
             # Use worst SL (trailing or fixed)
             effective_sl = None
@@ -1007,10 +1644,20 @@ class BacktestEngine:
         else:  # SHORT position
             # SHORT: SL/Trailing triggers on High, TP triggers on Low
             
+            # Use configured limit fill policy
+            is_cross = self.config.limit_fill_policy in ("cross", "cross_volume")
+            
             # Determine which can trigger
-            sl_triggered = stop_loss and candle_high >= stop_loss
-            trailing_triggered = trailing_stop and candle_high >= trailing_stop
-            tp_triggered = take_profit and candle_low <= take_profit
+            if is_cross and candle_open:
+                # Cross: Require price to move THROUGH the level or gap past it
+                sl_triggered = stop_loss and ((candle_open < stop_loss and candle_high > stop_loss) or (candle_open > stop_loss))
+                trailing_triggered = trailing_stop and ((candle_open < trailing_stop and candle_high > trailing_stop) or (candle_open > trailing_stop))
+                tp_triggered = take_profit and ((candle_open > take_profit and candle_low < take_profit) or (candle_open < take_profit))
+            else:
+                # Touch: (Standard/Default)
+                sl_triggered = stop_loss and candle_high >= stop_loss
+                trailing_triggered = trailing_stop and candle_high >= trailing_stop
+                tp_triggered = take_profit and candle_low <= take_profit
             
             # Use worst SL (trailing or fixed)
             effective_sl = None
@@ -1156,26 +1803,32 @@ class BacktestEngine:
         if self.current_position:
             total_equity += self.current_position.unrealized_pnl or Decimal("0")
         
-        # Calculate drawdown
-        drawdown_amount = total_equity - self.peak_equity
-        drawdown_percent = (drawdown_amount / self.peak_equity * Decimal("100")) if self.peak_equity > 0 else Decimal("0")
+        # Convert to float for curve storage and performance
+        total_equity_flt = float(total_equity)
+        peak_equity_flt = float(self.peak_equity)
+        initial_capital_flt = float(self.config.initial_capital)
+        current_price_flt = float(current_price)
         
-        # Calculate return
-        return_percent = ((total_equity - self.config.initial_capital) / self.config.initial_capital * Decimal("100"))
+        # Calculate drawdown (Float math)
+        drawdown_amount_flt = total_equity_flt - peak_equity_flt
+        drawdown_percent_flt = (drawdown_amount_flt / peak_equity_flt * 100.0) if peak_equity_flt > 0 else 0.0
         
-        # Calculate positions value
-        positions_value = Decimal("0")
+        # Calculate return (Float math)
+        return_percent_flt = ((total_equity_flt - initial_capital_flt) / initial_capital_flt * 100.0)
+        
+        # Calculate positions value (Float math)
+        positions_value_flt = 0.0
         if self.current_position:
-            positions_value = self.current_position.quantity * current_price
+            positions_value_flt = float(self.current_position.quantity) * current_price_flt
         
         point = EquityCurvePoint(
             timestamp=timestamp,
-            equity=total_equity,
-            cash=self.equity,  # Current cash balance
-            positions_value=positions_value,  # Value of open positions
-            drawdown=drawdown_amount,  # Drawdown amount
-            drawdown_percent=drawdown_percent,
-            return_percent=return_percent,
+            equity=total_equity_flt,
+            cash=float(self.equity),  # Current cash balance
+            positions_value=positions_value_flt,  # Value of open positions
+            drawdown=drawdown_amount_flt,  # Drawdown amount
+            drawdown_percent=drawdown_percent_flt,
+            return_percent=return_percent_flt,
         )
         
         self.equity_curve.append(point)

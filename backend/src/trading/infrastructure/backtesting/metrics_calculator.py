@@ -161,7 +161,8 @@ class MetricsCalculator:
         if not equity_curve or initial_capital == 0:
             return Decimal("0")
         
-        final_equity = equity_curve[-1].equity
+        # EquityCurvePoint.equity is now float
+        final_equity = Decimal(str(equity_curve[-1].equity))
         return ((final_equity - initial_capital) / initial_capital) * Decimal("100")
     
     def _calculate_annual_return(self, total_return: Decimal, duration_days: int) -> Decimal:
@@ -185,14 +186,16 @@ class MetricsCalculator:
         if not equity_curve or duration_days <= 0 or initial_capital == 0:
             return Decimal("0")
         
+        # Equity is float
         final_equity = equity_curve[-1].equity
+        initial_capital_flt = float(initial_capital)
         years = duration_days / 365.25
         
         if years == 0:
             return Decimal("0")
         
         try:
-            cagr = (pow(float(final_equity / initial_capital), 1 / years) - 1) * 100
+            cagr = (pow(final_equity / initial_capital_flt, 1 / years) - 1) * 100
             return Decimal(str(cagr))
         except:
             return Decimal("0")
@@ -229,10 +232,11 @@ class MetricsCalculator:
         if not equity_curve:
             return Decimal("0"), 0
         
-        max_dd = Decimal("0")
+        max_dd = 0.0
         max_dd_duration = 0
         
         for point in equity_curve:
+            # point.drawdown_percent is float
             if abs(point.drawdown_percent) > abs(max_dd):
                 max_dd = point.drawdown_percent
             
@@ -241,7 +245,7 @@ class MetricsCalculator:
             if point.drawdown_percent < 0:
                 max_dd_duration = max(max_dd_duration, 1)
         
-        return abs(max_dd), max_dd_duration
+        return Decimal(str(abs(max_dd))), max_dd_duration
     
     def _calculate_sharpe_ratio(
         self,

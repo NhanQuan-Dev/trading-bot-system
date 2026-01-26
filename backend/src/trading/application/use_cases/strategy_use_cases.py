@@ -74,9 +74,10 @@ class GetStrategiesUseCase:
         """Get user's strategies, optionally filtered by type."""
         
         if strategy_type:
-            # Get all strategies of type, then filter by user
+            # Get all strategies of type, then filter by user or default
             all_strategies = await self.strategy_repository.find_by_type(strategy_type)
-            return [s for s in all_strategies if s.user_id == user_id]
+            default_id = UUID("00000000-0000-0000-0000-000000000001")
+            return [s for s in all_strategies if s.user_id == user_id or s.user_id == default_id]
         else:
             return await self.strategy_repository.find_by_user(user_id)
 
@@ -94,8 +95,9 @@ class GetStrategyByIdUseCase:
         if not strategy:
             raise NotFoundError(f"Strategy with id {strategy_id} not found")
         
-        # Verify ownership
-        if strategy.user_id != user_id:
+        # Verify ownership (or system strategy)
+        default_id = UUID("00000000-0000-0000-0000-000000000001")
+        if strategy.user_id != user_id and strategy.user_id != default_id:
             raise ValidationError("Strategy does not belong to user")
         
         return strategy

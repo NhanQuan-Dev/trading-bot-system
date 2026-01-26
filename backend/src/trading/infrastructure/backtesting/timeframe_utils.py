@@ -1,8 +1,26 @@
 """Timeframe utilities for multi-timeframe backtesting."""
 
-from typing import List, Dict
+from typing import List, Dict, Any
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from dataclasses import dataclass
+
+@dataclass
+class MultiTimeframeContext:
+    """
+    Context object injected into multi-timeframe strategies.
+    
+    Attributes:
+        current_candles: Dictionary mapping timeframe (e.g., '1h') to the latest COMPLETED candle (dict).
+                         This prevents look-ahead bias (using current developing candle).
+                         Key: Timeframe string (e.g. '1h')
+                         Value: Candle dict
+        history: Dictionary mapping timeframe to a list of recent candles.
+                 Key: Timeframe string
+                 Value: List of candle dicts
+    """
+    current_candles: Dict[str, Dict[str, Any]]
+    history: Dict[str, List[Dict[str, Any]]]
 
 
 TIMEFRAME_MINUTES = {
@@ -80,20 +98,21 @@ def _aggregate_candles(candles: List[Dict], window_start: datetime) -> Dict:
     if not candles:
         raise ValueError("Cannot aggregate empty candle list")
     
-    # OHLC aggregation
-    open_price = Decimal(str(candles[0]["open"]))
-    high_price = max(Decimal(str(c["high"])) for c in candles)
-    low_price = min(Decimal(str(c["low"])) for c in candles)
-    close_price = Decimal(str(candles[-1]["close"]))
-    volume = sum(Decimal(str(c.get("volume", 0))) for c in candles)
+    # OHLC aggregation (Optimized: Use float directly since output is float)
+    # This avoids ~1.5 million unnecessary Decimal conversions for a 1-year backtest
+    open_price = float(candles[0]["open"])
+    high_price = max(float(c["high"]) for c in candles)
+    low_price = min(float(c["low"]) for c in candles)
+    close_price = float(candles[-1]["close"])
+    volume = sum(float(c.get("volume", 0)) for c in candles)
     
     return {
-        "timestamp": window_start.isoformat(),
-        "open": float(open_price),
-        "high": float(high_price),
-        "low": float(low_price),
-        "close": float(close_price),
-        "volume": float(volume),
+        "timestamp": window_start,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume": volume,
     }
 
 

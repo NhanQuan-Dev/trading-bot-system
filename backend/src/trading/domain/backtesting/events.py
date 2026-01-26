@@ -20,6 +20,9 @@ class BacktestEventType(str, Enum):
     # Trade lifecycle events
     TRADE_OPENED = "trade_opened"
     TRADE_CLOSED = "trade_closed"
+    SCALE_IN = "scale_in"
+    PARTIAL_CLOSE = "partial_close"
+    LEVELS_UPDATED = "levels_updated"
     
     # Exit events
     SL_HIT = "sl_hit"
@@ -34,6 +37,7 @@ class BacktestEventType(str, Enum):
     # Risk events
     LIQUIDATION = "liquidation"
     MARGIN_CALL = "margin_call"
+    MARGIN_UPDATED = "margin_updated"
 
 
 @dataclass
@@ -45,6 +49,7 @@ class BacktestEvent:
     event_type: BacktestEventType
     timestamp: datetime
     details: Dict[str, Any]
+    trade_id: Optional[UUID] = None
     
     def __init__(
         self,
@@ -52,9 +57,11 @@ class BacktestEvent:
         event_type: BacktestEventType,
         timestamp: datetime,
         details: Dict[str, Any],
+        trade_id: Optional[UUID] = None,
     ):
         self.id = uuid4()
         self.backtest_id = backtest_id
         self.event_type = event_type
         self.timestamp = timestamp
         self.details = details
+        self.trade_id = trade_id

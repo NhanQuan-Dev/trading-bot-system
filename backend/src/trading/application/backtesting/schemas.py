@@ -84,11 +84,19 @@ class BacktestConfigRequest(BaseModel):
     # Spec-required Phase 1: Fill policy configuration
     fill_policy: str = Field(
         default="optimistic",
-        description="Fill policy: optimistic (touch) | neutral (cross) | strict (cross+filter)"
+        description="DEPRECATED: Use market_fill_policy and limit_fill_policy"
+    )
+    market_fill_policy: str = Field(
+        default="close",
+        description="Market order fill price: close | low | high"
+    )
+    limit_fill_policy: str = Field(
+        default="cross",
+        description="Limit order fill condition: touch | cross | cross_volume"
     )
     price_path_assumption: str = Field(
         default="neutral",
-        description="TP/SL conflict resolution: neutral (SL first) | optimistic (TP first) | realistic (based on open)"
+        description="Conflict Resolution (TP/SL): neutral (SL first) | optimistic (TP first) | realistic (based on open)"
     )
     
     # Spec-required Phase 2: Multi-timeframe settings
@@ -96,6 +104,18 @@ class BacktestConfigRequest(BaseModel):
     signal_timeframe: str = Field(
         default="1m",
         description="Higher timeframe for strategy signals (1m/1h/4h/1d)"
+    )
+    
+    execution_delay_bars: int = Field(
+        default=0,
+        description="Number of 1m bars to delay signal execution",
+        ge=0
+    )
+
+    # Spec-required Phase 2: Condition timeframes (Multi-TF support)
+    condition_timeframes: Optional[List[str]] = Field(
+        default=None,
+        description="Timeframes to evaluate strategies conditions (e.g., ['15m', '30m', '1h'])"
     )
     
     # Spec-required Phase 3: Setup-Trigger model
@@ -133,6 +153,9 @@ class BacktestRunResponse(BaseModel):
     strategy_id: UUID
     strategy_name: Optional[str] = None
     
+    # NEW: Expose leverage for frontend convenience
+    leverage: Optional[int] = None
+    
     # Exchange connection
     exchange_connection_id: UUID
     exchange_name: Optional[str] = None
@@ -161,6 +184,9 @@ class BacktestRunResponse(BaseModel):
     # Spec-required: Phase 2-3 config info for frontend display
     signal_timeframe: Optional[str] = None
     fill_policy: Optional[str] = None
+    market_fill_policy: Optional[str] = None
+    limit_fill_policy: Optional[str] = None
+    price_path_assumption: Optional[str] = None
     
     created_at: datetime
     config: Dict[str, Any]
@@ -218,6 +244,8 @@ class TradeResponse(BaseModel):
     entry_price: Decimal
     exit_price: Decimal
     quantity: Decimal
+    initial_entry_price: Optional[Decimal] = None
+    initial_entry_quantity: Optional[Decimal] = None
     entry_time: str
     exit_time: str
     duration_seconds: Optional[int]
@@ -229,6 +257,12 @@ class TradeResponse(BaseModel):
     mae: Optional[Decimal]
     mfe: Optional[Decimal]
     is_winner: bool
+    
+    # Detailed Fees
+    maker_fee: Optional[Decimal] = Decimal("0")
+    taker_fee: Optional[Decimal] = Decimal("0")
+    funding_fee: Optional[Decimal] = Decimal("0")
+    
     entry_reason: Optional[Dict[str, Any]] = None
     
     # Spec-required: Timeline tracking

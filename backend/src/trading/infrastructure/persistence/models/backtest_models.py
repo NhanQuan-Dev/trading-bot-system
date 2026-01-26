@@ -1,7 +1,7 @@
 """Backtesting models for Phase 5."""
 
 from decimal import Decimal
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index, CheckConstraint, Text, DECIMAL, Date, JSON
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index, CheckConstraint, Text, DECIMAL, Date, JSON, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ENUM as PG_ENUM
 from sqlalchemy.orm import relationship
 import enum
@@ -162,6 +162,10 @@ class BacktestTradeModel(Base, UUIDPrimaryKeyMixin):
     exit_price = Column(DECIMAL(20, 8), nullable=False)
     quantity = Column(DECIMAL(20, 8), nullable=False)
     
+    # Scale-in tracking
+    initial_entry_price = Column(DECIMAL(20, 8), nullable=True)
+    initial_entry_quantity = Column(DECIMAL(20, 8), nullable=True)
+    
     # Timing
     entry_time = Column(DateTime(timezone=True), nullable=False)
     exit_time = Column(DateTime(timezone=True), nullable=False)
@@ -170,6 +174,9 @@ class BacktestTradeModel(Base, UUIDPrimaryKeyMixin):
     # P&L
     gross_pnl = Column(DECIMAL(20, 8), nullable=False)
     commission = Column(DECIMAL(20, 8), nullable=False, default=0)
+    maker_fee = Column(DECIMAL(20, 8), nullable=False, default=0)
+    taker_fee = Column(DECIMAL(20, 8), nullable=False, default=0)
+    funding_fee = Column(DECIMAL(20, 8), nullable=False, default=0)
     slippage = Column(DECIMAL(20, 8), nullable=False, default=0)
     net_pnl = Column(DECIMAL(20, 8), nullable=False)
     pnl_percent = Column(DECIMAL(10, 4), nullable=False)
@@ -184,3 +191,27 @@ class BacktestTradeModel(Base, UUIDPrimaryKeyMixin):
     
     # Relationship
     result = relationship("BacktestResultModel", foreign_keys=[result_id])
+
+
+class BacktestEventModel(Base, UUIDPrimaryKeyMixin):
+    """Event triggered during backtest execution."""
+    
+    __tablename__ = "backtest_events"
+    __table_args__ = (
+        Index('idx_backtest_events_backtest_id', 'backtest_id'),
+        Index('idx_backtest_events_trade_id', 'trade_id'),
+        Index('idx_backtest_events_event_type', 'event_type'),
+        Index('idx_backtest_events_timestamp', 'timestamp'),
+        {'comment': 'Events emitted during backtest execution'}
+    )
+    
+    backtest_id = Column(UUID(as_uuid=True), ForeignKey('backtest_runs.id', ondelete='CASCADE'), nullable=False)
+    trade_id = Column(UUID(as_uuid=True), ForeignKey('backtest_trades.id', ondelete='CASCADE'), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    details = Column(JSONType, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    
+    # Relationships
+    backtest_run = relationship("BacktestRunModel", foreign_keys=[backtest_id])
+    trade = relationship("BacktestTradeModel", foreign_keys=[trade_id])

@@ -128,17 +128,29 @@ class RunBacktestUseCase:
                     slippage_percent=config.slippage_percent,
                     commission_model=config.commission_model,
                     commission_rate=config.commission_percent,  # MarketSimulator expects commission_rate param
+                    market_fill_policy=config.market_fill_policy,
+                    limit_fill_policy=config.limit_fill_policy,
                 ),
             )
             
             # Progress callback for backtest engine (scales 0-100% to 80-100% overall)
+            # Progress callback for backtest engine (scales 0-100% to 80-100% overall)
             # Fetching is 80%, Simulation is 20% (per user request)
+            last_save_time = 0
+            
             async def progress_callback(percent: int):
+                nonlocal last_save_time
                 # Scale engine progress (0-100%) to overall progress (80-100%)
                 overall_percent = 80 + int(percent * 0.2)
                 message = f"Process {percent}% candles..."
                 backtest_run.update_progress(overall_percent, message)
-                await self.repository.save(backtest_run)
+                
+                # OPTIMIZATION: Debounce DB saves to max once every 2 seconds
+                # This prevents "15 transactions/sec" spam which locks the DB and slows down the UI
+                current_time = datetime.utcnow().timestamp()
+                if current_time - last_save_time > 2.0 or percent == 100 or percent % 10 == 0:
+                    await self.repository.save(backtest_run)
+                    last_save_time = current_time
             
             # Run backtest
             logger.info(f"Running backtest engine with {len(candles)} candles...")

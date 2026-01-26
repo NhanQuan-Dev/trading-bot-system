@@ -72,6 +72,7 @@ class StrategyResponse(BaseModel):
     created_at: str
     updated_at: str
     code_content: Optional[str] = None
+    required_timeframes: Optional[List[str]] = None
     
     # Parameters
     parameter_name: str
@@ -92,6 +93,33 @@ class StrategyResponse(BaseModel):
 
 def strategy_to_response(strategy) -> StrategyResponse:
     """Convert Strategy entity to response model."""
+    
+    # Simple extraction of required_timeframes from code_content
+    required_timeframes = []
+    if strategy.code_content:
+        import re
+        import ast
+        # Pattern 1: self.required_timeframes = ["1h", "4h"]
+        match = re.search(r'self\.required_timeframes\s*=\s*(\[[^\]]*\])', strategy.code_content)
+        if match:
+            try:
+                required_timeframes = ast.literal_eval(match.group(1))
+            except Exception:
+                pass
+        
+        # Pattern 2: @property def required_timeframes(...): return ["1h", "4h"]
+        if not required_timeframes:
+            # Look for: return ["1h", "4h"] after def required_timeframes
+            prop_match = re.search(
+                r'def\s+required_timeframes\s*\([^)]*\)[^:]*:\s*(?:[^r]*?)?return\s*(\[[^\]]*\])',
+                strategy.code_content, re.DOTALL
+            )
+            if prop_match:
+                try:
+                    required_timeframes = ast.literal_eval(prop_match.group(1))
+                except Exception:
+                    pass
+                
     return StrategyResponse(
         id=strategy.id,
         user_id=strategy.user_id,
@@ -118,6 +146,7 @@ def strategy_to_response(strategy) -> StrategyResponse:
         net_profit_loss=float(strategy.live_performance.net_profit_loss),
         max_drawdown=float(strategy.live_performance.max_drawdown),
         code_content=strategy.code_content,
+        required_timeframes=required_timeframes,
     )
 
 
